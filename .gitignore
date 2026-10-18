@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.smoke/
+*.log
+.DS_Store
+
+# Rust / Tauri 构建产物
+src-tauri/target/
+src-tauri/gen/
+
+# 工作区数据与临时文件
+.workbuddy/
+*.tmp
+qoder-body-debug.json
