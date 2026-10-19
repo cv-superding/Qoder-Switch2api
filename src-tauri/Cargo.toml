@@ -1,0 +1,57 @@
+[package]
+name = "qoder-switch2api"
+version = "1.0.0"
+description = "Qoder 多账号切换 + OpenAI/Anthropic 兼容反代（国内版 Qoder CN / 国际版）"
+authors = ["qoder-switch2api"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "qoder_switch2api_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "qoder-switch2api"
+path = "src/main.rs"
+
+[[bin]]
+name = "qoder-server"
+path = "src/bin/server.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes-gcm = "0.10"
+aes = "0.8"
+rsa = { version = "0.9", features = ["pem"] }
+md-5 = "0.10"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+futures-util = "0.3"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+url = "2"
+open = "5"
+rust-embed = "8"
+mime_guess = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 16
+lto = false
+strip = true

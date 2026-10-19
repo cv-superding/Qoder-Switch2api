@@ -1,0 +1,45 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build frontend
+        shell: pwsh
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build qoder-server.exe
+        shell: pwsh
+        working-directory: src-tauri
+        run: cargo build --release --bin qoder-server
+
+      - name: Build desktop app
+        shell: pwsh
+        working-directory: src-tauri
+        run: cargo build --release --bin qoder-switch2api
+
+      - name: Upload exe to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload v1.0.0 src-tauri/target/release/qoder-server.exe --clobber --repo ${{ github.repository }}
+          gh release upload v1.0.0 src-tauri/target/release/qoder-switch2api.exe --clobber --repo ${{ github.repository }}

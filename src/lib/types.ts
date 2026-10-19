@@ -1,0 +1,154 @@
+/** 与后端一致的类型定义 */
+
+export type Edition = "domestic" | "international";
+
+export const EDITIONS: { value: Edition; label: string; product: string }[] = [
+  { value: "domestic", label: "国内版", product: "Qoder CN" },
+  { value: "international", label: "国际版", product: "Qoder" },
+];
+
+export function editionLabel(value: string): string {
+  return EDITIONS.find((e) => e.value === value)?.label ?? "国内版";
+}
+
+export function isInternational(account: Account): boolean {
+  return account.edition === "international";
+}
+
+export interface Account {
+  id: string;
+  edition: Edition;
+  label: string;
+  name: string;
+  email: string;
+  phone: string;
+  avatarUrl: string;
+  uid: string;
+  userType: string;
+  orgId: string;
+  orgName: string;
+  group: string;
+  authSource: string;
+  status: "active" | "needs_relogin" | "disabled";
+  lastError: string;
+  lastUsedAt: number | null;
+  lastSwitchAt: number | null;
+  tokenExpireAt: string | null;
+  refreshTokenExpireAt: string | null;
+  machineId: string;
+  quota: {
+    total: number | null;
+    used: number | null;
+    remaining: number | null;
+    percentage: number | null;
+    unit: string;
+    expiresAt: number | null;
+    updatedAt: number;
+  } | null;
+  plan: { userType: string; planTierName: string; endDate: number | null } | null;
+  createdAt: number;
+  updatedAt: number;
+  hasToken: boolean;
+  hasRefreshToken: boolean;
+  hasPat: boolean;
+  tokenMask: string;
+  cooling: boolean;
+}
+
+export interface ClientInfo {
+  edition: Edition;
+  dir: string;
+  exists: boolean;
+  authKind: string | null;
+  hasAuthFile: boolean;
+  hasOscryptKey: boolean;
+  machineId: string;
+  clientExePath: string;
+  sqlite: boolean;
+}
+
+export interface ProxyConfig {
+  enabled: boolean;
+  listen: string;
+  apiKey: string;
+  extraModels: string[];
+  accountGroup: string;
+}
+
+export interface EditionStatus {
+  client: ClientInfo;
+  currentAccount: { uid: string; name: string; email: string; id: string; at: number } | null;
+  proxy: ProxyConfig & { running: boolean };
+  accounts: number;
+  proxyAccounts: number;
+}
+
+export interface AppStatus {
+  version: string;
+  editions: { domestic: EditionStatus; international: EditionStatus };
+  counts: { domestic: number; international: number; proxyDomestic: number; proxyInternational: number };
+  sqlite: boolean;
+}
+
+export interface QuotaInfo {
+  usageType: string;
+  totalUsagePercentage: number | null;
+  isQuotaExceeded: boolean;
+  expiresAt: number | null;
+  quota: { total: number | null; used: number | null; remaining: number | null; percentage: number | null; unit: string } | null;
+}
+
+export interface PlanInfo {
+  userType: string;
+  planTierName: string;
+  isPersonalVersion: boolean;
+  startDate: number | null;
+  endDate: number | null;
+}
+
+export interface UsageStats {
+  totals: { requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number };
+  byAccount: { name: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number }[];
+  byModel: { name: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number }[];
+  byApi: { name: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number }[];
+  daily: { day: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number }[];
+  recent: {
+    ts: number; edition: string; accountName: string; model: string;
+    promptTokens: number; completionTokens: number; totalTokens: number;
+    success: boolean; error: string; api: string;
+  }[];
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  path: string;
+  chatCount: number;
+}
+
+export interface ChatItem {
+  id: string;
+  title: string;
+  timestamp: number | null;
+  sessionId: string;
+  contexts: { id: string; name: string; type: string }[];
+}
+
+export interface Settings {
+  theme: "light" | "dark" | "system";
+  clientDirOverrides: { domestic: string; international: string };
+  clientExePaths: { domestic: string; international: string };
+  autoCheckin: { enabled: boolean; hour: number };
+  endpointOverrides: Record<string, Record<string, string>>;
+  proxy: { domestic: ProxyConfig; international: ProxyConfig };
+}
+
+export const ACCOUNT_GROUPS = [
+  { value: "", label: "未分组" },
+  { value: "desktop", label: "桌面端" },
+  { value: "proxy", label: "反代API" },
+];
+
+export function accountGroupLabel(group: string | undefined): string {
+  return ACCOUNT_GROUPS.find((g) => g.value === (group ?? ""))?.label ?? "未分组";
+}
