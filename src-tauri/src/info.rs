@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use crate::account::{Account, QuotaPart};
-use crate::cosy::legacy_decode;
+use crate::cosy::{build_model_list_headers, legacy_decode};
 use crate::editions::Edition;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -289,33 +289,54 @@ pub async fn claim_campaign(edition: &Edition, account: &Account, campaign_id: &
     }))
 }
 
-/// 拉取上游可用模型列表（兼容明文 JSON / {body} 信封 / legacy 编码）
+/// 拉取上游可用模型列表。
+/// 需要 Cosy 签名（签名路径剥 /algo、GET 无 body），国际版按 api1 → api2 → api3 兜底。
 pub async fn fetch_model_list(edition: &Edition, account: &Account) -> Result<Vec<Value>, String> {
-    let resp = crate::http::client()
-        .get(&edition.legacy.model_list_url)
-        .header("Authorization", auth_header(account))
-        .header("x-model-source", "system")
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        // 与 Node 版一致：模型列表拉取失败静默降级为空列表（前端展示默认模型）
-        return Ok(Vec::new());
-    }
-    let payload: Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => {
-            let decoded = legacy_decode(&text);
-            serde_json::from_str(&decoded).unwrap_or(Value::Null)
+    let mut urls = vec![edition.legacy.model_list_url.clone()];
+    urls.extend(edition.legacy.model_list_fallbacks.iter().cloned());
+    let mut last_error = String::new();
+    for url in urls {
+        let headers = build_model_list_headers(account, edition, &url);
+        let mut request = crate::http::client()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(20));
+        for (key, value) in &headers {
+            request = request.header(key, value);
         }
-    };
-    Ok(extract_models(&payload))
+        match request.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    last_error = format!("HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>());
+                    continue;
+                }
+                let payload: Value = match serde_json::from_str(&text) {
+                    Ok(value) => value,
+                    Err(_) => serde_json::from_str(&legacy_decode(&text)).unwrap_or(Value::Null),
+                };
+                let models = extract_models(&payload);
+                if !models.is_empty() {
+                    return Ok(models);
+                }
+                last_error = "上游未返回模型列表".into();
+            }
+            Err(e) => {
+                last_error = format!("请求失败: {}", e);
+            }
+        }
+    }
+    if last_error.is_empty() || last_error == "上游未返回模型列表" {
+        Ok(Vec::new())
+    } else {
+        Err(last_error)
+    }
 }
 
 fn extract_models(payload: &Value) -> Vec<Value> {
+    // 新版响应顶层按场景分组：chat / developer / inline / quest ...
     let candidates = [
+        payload.get("chat"),
         payload.get("models"),
         payload.get("data"),
         payload.get("body"),
@@ -340,6 +361,11 @@ fn extract_models(payload: &Value) -> Vec<Value> {
 fn normalize_model(m: &Value) -> Option<Value> {
     if let Some(s) = m.as_str() {
         return Some(json!({ "id": s, "displayName": s, "ownedBy": "qoder" }));
+    }
+    if m.get("enable").and_then(|v| v.as_bool()) == Some(false)
+        || m.get("enabled").and_then(|v| v.as_bool()) == Some(false)
+    {
+        return None;
     }
     let id = m
         .get("key")

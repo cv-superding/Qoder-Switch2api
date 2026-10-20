@@ -3,7 +3,7 @@
  * 端点与 qoder2api / cpa-multi-plugins / dsh-qoder-connect 对齐。
  */
 import { fetchJson } from "../http.js";
-import { legacyDecode } from "./cosy.js";
+import { buildModelListHeaders, legacyDecode } from "./cosy.js";
 
 function openApi(edition, p) {
   return edition.oauth.openApiBaseUrl + p;
@@ -194,35 +194,45 @@ export async function claimCampaign(edition, account, campaignId) {
 
 /**
  * 拉取上游可用模型列表。
- * 网关响应可能是明文 JSON、{body:"..."} 信封或 legacy 编码，逐一兼容。
+ * 需要 Cosy 签名（签名路径剥 /algo、GET 无 body），国际版按 api1 → api2 → api3 兜底。
  */
 export async function fetchModelList(edition, account) {
-  const url = edition.legacy.modelListUrl;
-  const result = await fetchJson(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${account.pat || account.securityOauthToken}`,
-      "x-model-source": "system",
-    },
-    timeoutMs: 20000,
-  }).catch(() => null);
-  if (!result || !result.ok) return [];
-  let payload = result.json;
-  if (!payload) {
-    try {
-      payload = JSON.parse(legacyDecode(result.text || ""));
-    } catch {
-      return [];
+  const urls = [edition.legacy.modelListUrl, ...(edition.legacy.modelListFallbacks || [])].filter(Boolean);
+  let lastError = "";
+  for (const url of urls) {
+    const headers = buildModelListHeaders({ account, edition, requestUrl: url });
+    const result = await fetchJson(url, { method: "GET", headers, timeoutMs: 20000 }).catch((e) => ({
+      error: e.message,
+    }));
+    if (result.error) {
+      lastError = result.error;
+      continue;
     }
+    if (!result.ok) {
+      lastError = `HTTP ${result.status}: ${(result.text || "").slice(0, 200)}`;
+      continue;
+    }
+    let payload = result.json;
+    if (!payload) {
+      try {
+        payload = JSON.parse(legacyDecode(result.text || ""));
+      } catch {
+        payload = null;
+      }
+    }
+    const models = extractModels(payload);
+    if (models.length > 0) return models;
+    lastError = "上游未返回模型列表";
   }
-  const models = extractModels(payload);
-  return models;
+  if (lastError && !lastError.includes("未返回模型列表")) throw new Error(lastError);
+  return [];
 }
 
 function extractModels(payload) {
   if (!payload) return [];
   if (Array.isArray(payload)) return payload.map(normalizeModel).filter(Boolean);
-  const candidates = [payload.models, payload.data, payload.body, payload.list];
+  // 新版响应顶层按场景分组：chat / developer / inline / quest ...
+  const candidates = [payload.chat, payload.models, payload.data, payload.body, payload.list];
   for (const c of candidates) {
     if (Array.isArray(c)) return c.map(normalizeModel).filter(Boolean);
     if (typeof c === "string") {
@@ -240,6 +250,7 @@ function extractModels(payload) {
 function normalizeModel(m) {
   if (typeof m === "string") return { id: m, ownedBy: "qoder" };
   if (m && typeof m === "object") {
+    if (m.enable === false || m.enabled === false) return null;
     const id = m.key || m.id || m.model || m.name;
     if (!id) return null;
     return {

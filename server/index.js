@@ -76,7 +76,10 @@ function effectiveEdition(value) {
   if (override.clientId) merged.oauth.clientId = override.clientId;
   if (override.openApiBaseUrl) merged.oauth.openApiBaseUrl = override.openApiBaseUrl;
   if (override.streamUrl) merged.legacy.streamUrl = override.streamUrl;
-  if (override.modelListUrl) merged.legacy.modelListUrl = override.modelListUrl;
+  if (override.modelListUrl) {
+    merged.legacy.modelListUrl = override.modelListUrl;
+    merged.legacy.modelListFallbacks = [];
+  }
   if (override.cloudBaseUrl) merged.cloud.baseUrl = override.cloudBaseUrl;
   return merged;
 }

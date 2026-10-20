@@ -43,6 +43,7 @@ export const EDITIONS = {
         "https://gateway.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1",
       streamPath: "/api/v2/service/pro/sse/agent_chat_generation",
       modelListUrl: "https://gateway.qoder.com.cn/algo/api/v2/model/list?Encode=1",
+      modelListFallbacks: [],
       cosyVersion: "0.1.43",
       serverPubKey:
         "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc\n4k6Pz1EaDicBMpdpxKduSZu5OANqUq8er4GM95omAGIOPOh+Nx0spthYA2BqGz+l\n6HRkPJ7S236FZz73In/KVuLnwI8JJ2CbuJap8kvheCCZpmAWpb/cPx/3Vr/J6I17\nXcW+ML9FoCI6AOvOzwIDAQAB\n-----END PUBLIC KEY-----",
@@ -82,7 +83,11 @@ export const EDITIONS = {
       streamUrl:
         "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1",
       streamPath: "/api/v2/service/pro/sse/agent_chat_generation",
-      modelListUrl: "https://api3.qoder.sh/algo/api/v2/model/list?Encode=1",
+      modelListUrl: "https://api1.qoder.sh/algo/api/v2/model/list?Encode=1",
+      modelListFallbacks: [
+        "https://api2.qoder.sh/algo/api/v2/model/list?Encode=1",
+        "https://api3.qoder.sh/algo/api/v2/model/list?Encode=1",
+      ],
       cosyVersion: "0.1.43",
       serverPubKey:
         "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc\n4k6Pz1EaDicBMpdpxKduSZu5OANqUq8er4GM95omAGIOPOh+Nx0spthYA2BqGz+l\n6HRkPJ7S236FZz73In/KVuLnwI8JJ2CbuJap8kvheCCZpmAWpb/cPx/3Vr/J6I17\nXcW+ML9FoCI6AOvOzwIDAQAB\n-----END PUBLIC KEY-----",

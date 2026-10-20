@@ -143,6 +143,70 @@ export function buildLegacyStreamHeaders({ account, edition, requestPath, reques
   };
 }
 
+/**
+ * 模型列表专用 Cosy 头。
+ * 与推理请求的差异（2026-10 实测）：
+ *  - 签名路径剥离 `/algo` 前缀
+ *  - cosy-version = 1.0.0，cosy-data-policy = disagree
+ *  - 需要 cosy-bodyhash / cosy-bodylength / cosy-sigpath 等新头
+ *  - GET 不带请求体（带体会被网关判 404）
+ */
+export function buildModelListHeaders({ account, edition, requestUrl }) {
+  const aesKey = aesKeyMaterial();
+  const userInfo = {
+    uid: account.uid || "",
+    security_oauth_token: account.securityOauthToken || "",
+    name: account.name || "",
+    aid: account.aid || "",
+    email: account.email || "",
+  };
+  const encryptedInfo = cosyAesEncrypt(JSON.stringify(userInfo), aesKey).toString("base64");
+  const rsaEncryptedKey = cosyRsaEncrypt(edition.legacy.serverPubKey, Buffer.from(aesKey, "utf8")).toString("base64");
+  const requestId = uuid();
+  const cosyDate = String(Math.floor(Date.now() / 1000));
+  const cosyVersion = "1.0.0";
+  const payload = {
+    version: "v1",
+    requestId,
+    info: encryptedInfo,
+    cosyVersion,
+    ideVersion: "",
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+  const rawPath = new URL(requestUrl).pathname;
+  const sigPath = rawPath.startsWith("/algo") ? rawPath.slice(5) : rawPath;
+  const body = "";
+  const sig = md5(`${payloadB64}\n${rsaEncryptedKey}\n${cosyDate}\n${body}\n${sigPath}`);
+  const machineToken = account.machineToken || randomMachineToken();
+  const machineType = account.machineType || randomHex(9);
+  const machineId = account.machineId || uuid();
+  return {
+    authorization: `Bearer COSY.${payloadB64}.${sig}`,
+    "cosy-data-policy": "disagree",
+    "content-type": "application/json",
+    accept: "application/json",
+    "accept-encoding": "identity",
+    "cosy-clienttype": "5",
+    "cosy-clientip": "127.0.0.1",
+    "cosy-date": cosyDate,
+    "cosy-key": rsaEncryptedKey,
+    "cosy-machineid": machineId,
+    "cosy-machinetoken": machineToken,
+    "cosy-machinetype": machineType,
+    "cosy-machineos": "x86_64_windows",
+    "cosy-user": account.uid || "",
+    "cosy-version": cosyVersion,
+    "cosy-bodyhash": md5(body),
+    "cosy-bodylength": String(Buffer.byteLength(body, "latin1")),
+    "cosy-sigpath": sigPath,
+    "cosy-organization-id": "",
+    "cosy-organization-tags": "",
+    "login-version": "v2",
+    "user-agent": "Go-http-client/2.0",
+    "x-request-id": uuid(),
+  };
+}
+
 function randomMachineToken() {
   const raw = (uuid() + uuid()).slice(0, 50);
   return Buffer.from(raw, "utf8").toString("base64url");

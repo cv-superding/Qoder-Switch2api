@@ -162,6 +162,7 @@ impl AppState {
         }
         if let Some(v) = overrides.get("modelListUrl") {
             edition.legacy.model_list_url = v.clone();
+            edition.legacy.model_list_fallbacks.clear();
         }
         if let Some(v) = overrides.get("cloudBaseUrl") {
             edition.cloud.base_url = v.clone();

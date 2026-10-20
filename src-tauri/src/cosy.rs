@@ -198,6 +198,91 @@ pub fn legacy_decode(encoded: &str) -> String {
     .unwrap_or_default()
 }
 
+/// 模型列表专用 Cosy 头（2026-10 上游实测）：
+/// 签名路径剥 `/algo`、cosy-version=1.0.0、data-policy=disagree、
+/// 附带 bodyhash/bodylength/sigpath 等新头；GET 不带 body。
+pub fn build_model_list_headers(
+    account: &crate::account::Account,
+    edition: &crate::editions::Edition,
+    request_url: &str,
+) -> HashMap<String, String> {
+    let aes_key = aes_key_material();
+    let user_info = serde_json::json!({
+        "uid": account.uid,
+        "security_oauth_token": account.security_oauth_token,
+        "name": account.name,
+        "aid": account.aid,
+        "email": account.email,
+    });
+    let encrypted_info = cosy_aes_encrypt(&user_info.to_string(), &aes_key);
+    let rsa_encrypted_key = cosy_rsa_encrypt(&edition.legacy.server_pub_key, aes_key.as_bytes());
+    let request_id = uuid();
+    let cosy_date = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string();
+    let cosy_version = "1.0.0";
+    let payload = serde_json::json!({
+        "version": "v1",
+        "requestId": request_id,
+        "info": encrypted_info,
+        "cosyVersion": cosy_version,
+        "ideVersion": "",
+    });
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes());
+    let raw_path = url::Url::parse(request_url)
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
+    let sig_path = raw_path.strip_prefix("/algo").unwrap_or(&raw_path).to_string();
+    let body = "";
+    let sig_input = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        payload_b64, rsa_encrypted_key, cosy_date, body, sig_path
+    );
+    let signature = md5_hex(&sig_input);
+    let machine_token = if account.machine_token.is_empty() {
+        random_machine_token()
+    } else {
+        account.machine_token.clone()
+    };
+    let machine_type = if account.machine_type.is_empty() {
+        random_hex(9)
+    } else {
+        account.machine_type.clone()
+    };
+    let machine_id = if account.machine_id.is_empty() {
+        uuid()
+    } else {
+        account.machine_id.clone()
+    };
+    let mut headers = HashMap::new();
+    headers.insert("authorization".into(), format!("Bearer COSY.{}.{}", payload_b64, signature));
+    headers.insert("cosy-data-policy".into(), "disagree".into());
+    headers.insert("content-type".into(), "application/json".into());
+    headers.insert("accept".into(), "application/json".into());
+    headers.insert("accept-encoding".into(), "identity".into());
+    headers.insert("cosy-clienttype".into(), "5".into());
+    headers.insert("cosy-clientip".into(), "127.0.0.1".into());
+    headers.insert("cosy-date".into(), cosy_date);
+    headers.insert("cosy-key".into(), rsa_encrypted_key);
+    headers.insert("cosy-machineid".into(), machine_id);
+    headers.insert("cosy-machinetoken".into(), machine_token);
+    headers.insert("cosy-machinetype".into(), machine_type);
+    headers.insert("cosy-machineos".into(), "x86_64_windows".into());
+    headers.insert("cosy-user".into(), account.uid.clone());
+    headers.insert("cosy-version".into(), cosy_version.into());
+    headers.insert("cosy-bodyhash".into(), md5_hex(body));
+    headers.insert("cosy-bodylength".into(), body.len().to_string());
+    headers.insert("cosy-sigpath".into(), sig_path);
+    headers.insert("cosy-organization-id".into(), String::new());
+    headers.insert("cosy-organization-tags".into(), String::new());
+    headers.insert("login-version".into(), "v2".into());
+    headers.insert("user-agent".into(), "Go-http-client/2.0".into());
+    headers.insert("x-request-id".into(), uuid());
+    headers
+}
+
 fn random_machine_token() -> String {
     let raw = format!("{}{}", uuid().replace('-', ""), uuid().replace('-', ""));
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())

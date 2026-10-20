@@ -172,6 +172,13 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 更新日志
 
+### v1.1.10
+
+- 修复「获取上游模型」失败：模型列表接口需要 Cosy 签名，裸 Bearer 请求会 403 `Signature invalid`
+- 按当前上游规则重写模型列表请求：签名路径剥离 `/algo`、`cosy-version=1.0.0`、附带 bodyhash / sigpath 等新头
+- 国际版模型列表按 api1 → api2 → api3 自动兜底，解析新版 `chat` 场景并过滤禁用模型
+- 已用真实国内版 / 国际版账号实测，分别返回 14 / 15 个模型
+
 ### v1.1.9
 
 - 修复签到判据：领取后上游会把 `actionType` 降级为 `VIEW_DETAILS`，现在以 `claimStatus` 为主，避免把已签到误报成未签到
