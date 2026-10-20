@@ -132,6 +132,17 @@ export interface PlanInfo {
   endDate: number | null;
 }
 
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseUrl: string;
+  downloadUrl: string;
+  releaseName: string;
+  publishedAt: string | null;
+  notes: string;
+}
+
 export interface UsageStats {
   totals: { requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number };
   byAccount: { name: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number }[];

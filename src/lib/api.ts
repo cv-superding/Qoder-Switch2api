@@ -2,7 +2,7 @@
 
 import type {
   Account, AppStatus, BackupResult, ChatItem, CheckinResult, CheckinState, ClientInfo, PlanInfo, ProxyConfig, QuotaInfo,
-  Settings, UsageStats, Workspace,
+  Settings, UpdateInfo, UsageStats, Workspace,
 } from "@/lib/types";
 
 const BASE = "/api";
@@ -124,4 +124,5 @@ export const api = {
     request<{ settings: Settings }>("/settings", { method: "POST", body: JSON.stringify({ settings }) }),
   getAbout: () =>
     request<{ name: string; version: string; description: string; references: string[] }>("/about"),
+  checkUpdate: (force = false) => request<UpdateInfo>(`/update/check${force ? "?force=1" : ""}`),
 };

@@ -22,6 +22,7 @@ pub mod sessions;
 pub mod state;
 pub mod store;
 pub mod switcher;
+pub mod update;
 pub mod usage;
 
 use axum::{

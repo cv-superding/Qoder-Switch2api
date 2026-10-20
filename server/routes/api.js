@@ -14,6 +14,7 @@ import { usageStats } from "../proxy/usage.js";
 import { loadJson, saveJson, appendJsonl, readJsonl } from "../store.js";
 import { randomId } from "../crypto.js";
 import { APP_NAME, APP_VERSION } from "../version.js";
+import { checkUpdate } from "../update.js";
 
 export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServers, getEdition, detectClient }) {
   const router = express.Router();
@@ -478,6 +479,15 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
         "https://github.com/70548887/Qoder-Switch（MITM 切换参考）",
       ],
     });
+  });
+
+  router.get("/update/check", async (req, res) => {
+    try {
+      const data = await checkUpdate({ force: req.query.force === "1" });
+      res.json(data);
+    } catch (e) {
+      res.status(502).json({ error: e.message });
+    }
   });
 
   return router;

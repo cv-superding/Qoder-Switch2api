@@ -1,8 +1,9 @@
-import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { HashRouter, Navigate, NavLink, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import {
-  BarChart3, Github, Globe2, Menu, MessagesSquare, Network, Settings2, Sparkles, Users, X,
+  ArrowUpRight, BarChart3, Download, Github, Globe2, Menu, MessagesSquare, Network, Settings2, Sparkles, Star, Users, X,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { AppIconMark, QoderCnMark, QoderMark, StatusDot } from "@/components/product-marks";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -12,6 +13,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import * as api from "@/lib/api";
 import { applyTheme, getSavedTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import type { UpdateInfo } from "@/lib/types";
+import { useUpdateStore } from "@/stores/update";
 import AccountsPage from "@/pages/AccountsPage";
 import ApiProxyPage from "@/pages/ApiProxyPage";
 import TokenStatsPage from "@/pages/TokenStatsPage";
@@ -191,7 +194,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
                   <Github className="size-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="top">GitHub 仓库</TooltipContent>
+              <TooltipContent side="top">GitHub 仓库 · 求个 Star</TooltipContent>
             </Tooltip>
           </div>
         </div>
@@ -287,6 +290,87 @@ function GlobalTopbar({ onMenu }: { onMenu: () => void }) {
   );
 }
 
+const UPDATE_DISMISS_KEY = "qoder-switch2api.update-dismissed";
+
+function openUpdate(info: UpdateInfo) {
+  const url = info.downloadUrl || info.releaseUrl;
+  void api.api.openExternal(url).catch(() => {});
+}
+
+function openRepo() {
+  void api.api.openExternal("https://github.com/cv-superding/Qoder-Switch2api").catch(() => {});
+}
+
+function UpdateBanner() {
+  const { info, check } = useUpdateStore();
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(UPDATE_DISMISS_KEY) || "");
+  const notified = useRef("");
+
+  useEffect(() => {
+    void check();
+    const timer = window.setInterval(() => void check(), 6 * 60 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [check]);
+
+  useEffect(() => {
+    if (!info?.hasUpdate || info.latestVersion === dismissed) return;
+    if (notified.current === info.latestVersion) return;
+    notified.current = info.latestVersion;
+    toast.info(`发现新版本 v${info.latestVersion}`, {
+      description: `当前 v${info.currentVersion}，建议更新后继续使用。`,
+      action: { label: "查看更新", onClick: () => openUpdate(info) },
+      duration: 12000,
+    });
+  }, [info, dismissed]);
+
+  if (!info?.hasUpdate) return null;
+  const latest = info.latestVersion;
+  if (latest === dismissed) return null;
+
+  function dismiss() {
+    localStorage.setItem(UPDATE_DISMISS_KEY, latest);
+    setDismissed(latest);
+  }
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-primary/15 bg-primary/[0.06] px-4 py-2.5 text-[11.5px] sm:px-6 lg:px-8">
+      <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/12 text-primary">
+        <Download className="size-3.5" />
+      </span>
+      <span className="font-medium text-foreground">发现新版本 v{info.latestVersion}</span>
+      <span className="text-muted-foreground">当前 v{info.currentVersion}</span>
+      <div className="ml-auto flex items-center gap-1.5">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+          onClick={openRepo}
+          title="打开 GitHub 仓库，求个 Star"
+        >
+          <Github className="size-3.5" />
+          求个 Star
+          <Star className="size-3 fill-amber-400 text-amber-500" />
+        </Button>
+        <Button size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => openUpdate(info)}>
+          <Download className="size-3.5" />
+          下载更新
+          <ArrowUpRight className="size-3" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 text-muted-foreground hover:text-foreground"
+          onClick={dismiss}
+          aria-label="忽略此版本"
+          title="忽略此版本"
+        >
+          <X className="size-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function Layout() {
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -340,6 +424,7 @@ function Layout() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <GlobalTopbar onMenu={() => setMobileOpen(true)} />
+        <UpdateBanner />
         <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <div className="mx-auto w-full max-w-[1280px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
             <div key={location.pathname} className="page-enter">

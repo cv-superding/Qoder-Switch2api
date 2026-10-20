@@ -1,7 +1,7 @@
 {
   "name": "qoder-switch2api",
   "private": true,
-  "version": "1.1.10",
+  "version": "1.1.11",
   "author": "qoder-switch2api",
   "license": "MIT",
   "type": "module",

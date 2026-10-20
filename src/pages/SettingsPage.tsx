@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  CalendarCheck, Check, ChevronDown, ExternalLink, FolderGit2, Github, Info, Loader2, Monitor, Moon, Palette,
-  RefreshCw, Save, ShieldCheck, SlidersHorizontal, Sun, TriangleAlert,
+  CalendarCheck, Check, ChevronDown, Download, ExternalLink, FolderGit2, Github, Info, Loader2, Monitor, Moon, Palette,
+  RefreshCw, Save, ShieldCheck, SlidersHorizontal, Star, Sun, TriangleAlert,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -17,6 +17,7 @@ import * as api from "@/lib/api";
 import { applyTheme, getSavedTheme, useTheme, type ThemeMode } from "@/lib/theme";
 import type { ClientInfo, Edition, Settings } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useUpdateStore } from "@/stores/update";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; hint: string; icon: typeof Sun }[] = [
   { value: "light", label: "浅色", hint: "明亮的工作区", icon: Sun },
@@ -42,6 +43,7 @@ export default function SettingsPage() {
   const [loadError, setLoadError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [theme, setLocalTheme] = useTheme();
+  const { info: updateInfo, checking: updateChecking, error: updateError, check: checkUpdate } = useUpdateStore();
 
   useEffect(() => {
     setLoadError("");
@@ -92,6 +94,13 @@ export default function SettingsPage() {
 
   function openGithub() {
     void api.api.openExternal("https://github.com/cv-superding/Qoder-Switch2api").catch((e) => {
+      toast.error("打开失败", { description: api.asError(e) });
+    });
+  }
+
+  function openUpdate() {
+    const url = updateInfo?.downloadUrl || updateInfo?.releaseUrl || "https://github.com/cv-superding/Qoder-Switch2api/releases/latest";
+    void api.api.openExternal(url).catch((e) => {
       toast.error("打开失败", { description: api.asError(e) });
     });
   }
@@ -373,16 +382,52 @@ export default function SettingsPage() {
           title="关于"
           description={about?.description ?? "Qoder 多账号切换 + OpenAI / Anthropic 兼容反代"}
           action={
-            <Button variant="outline" size="sm" className="h-8" onClick={openGithub}>
-              <Github />
-              GitHub
-              <ExternalLink className="size-3" />
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8"
+                onClick={() => void checkUpdate(true)}
+                disabled={updateChecking}
+              >
+                <RefreshCw className={cn(updateChecking && "animate-spin")} />
+                {updateChecking ? "检查中" : "检查更新"}
+              </Button>
+              <Button variant="outline" size="sm" className="h-8" onClick={openGithub} title="打开 GitHub 仓库，求个 Star">
+                <Github />
+                求个 Star
+                <Star className="size-3 fill-amber-400 text-amber-500" />
+                <ExternalLink className="size-3" />
+              </Button>
+            </div>
           }
         >
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
             <Badge variant="secondary" className="h-6 font-mono text-[10px]">{about?.name ?? "Qoder-Switch2api"} v{about?.version ?? "—"}</Badge>
             <span>仅供学习研究使用，请遵守 Qoder 服务条款。</span>
+          </div>
+          <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px]">
+            {updateChecking ? (
+              <span className="text-muted-foreground">正在检查更新…</span>
+            ) : updateInfo?.hasUpdate ? (
+              <>
+                <Badge variant="warning" className="h-6 text-[10px]">新版本 v{updateInfo.latestVersion}</Badge>
+                <span className="text-muted-foreground">当前 v{updateInfo.currentVersion}</span>
+                <Button variant="outline" size="sm" className="h-7 px-2 text-[10.5px]" onClick={openUpdate}>
+                  <Download className="size-3" />
+                  下载更新
+                </Button>
+              </>
+            ) : updateInfo ? (
+              <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+                <Check className="size-3.5" />
+                已是最新版本 v{updateInfo.currentVersion}
+              </span>
+            ) : updateError ? (
+              <span className="text-destructive">检查更新失败：{updateError}</span>
+            ) : (
+              <span className="text-muted-foreground">程序启动时会自动检查更新</span>
+            )}
           </div>
           {about?.references?.length ? (
             <div className="mt-3 space-y-1">

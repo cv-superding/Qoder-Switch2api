@@ -26,6 +26,7 @@ pub fn create_api_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/status", get(get_status))
         .route("/about", get(get_about))
+        .route("/update/check", get(check_update))
         .route("/accounts", get(list_accounts).post(add_account))
         .route("/accounts/export", post(export_accounts))
         .route("/accounts/import", post(import_accounts))
@@ -139,6 +140,13 @@ async fn get_about() -> Response {
             "https://github.com/70548887/Qoder-Switch（MITM 切换参考）"
         ]
     }))
+}
+
+async fn check_update(Query(q): Query<HashMap<String, String>>) -> Response {
+    match crate::update::check_update(q.get("force").map(|v| v == "1").unwrap_or(false)).await {
+        Ok(data) => ok_json(data),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
 }
 
 /* ---------------- 账号 ---------------- */
