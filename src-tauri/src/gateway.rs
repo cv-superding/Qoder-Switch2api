@@ -162,6 +162,30 @@ struct UpstreamResult {
     events: Vec<ChatEvent>,
 }
 
+/// 上游失败时保留最后尝试的账号，用于用量归因（避免「未知账号」）
+struct UpstreamFailure {
+    status: StatusCode,
+    message: String,
+    account_id: String,
+    account_name: String,
+}
+
+fn account_display_name(account: &crate::account::Account) -> String {
+    for value in [
+        &account.name,
+        &account.email,
+        &account.phone,
+        &account.label,
+        &account.uid,
+        &account.id,
+    ] {
+        if !value.is_empty() {
+            return value.clone();
+        }
+    }
+    "未知账号".to_string()
+}
+
 /// 带轮转和重试的上游调用
 async fn run_with_account(
     state: &Arc<AppState>,
@@ -174,10 +198,11 @@ async fn run_with_account(
     reasoning_effort: Option<String>,
     thinking_type: Option<String>,
     thinking_budget: Option<i64>,
-) -> Result<UpstreamResult, (StatusCode, String)> {
+) -> Result<UpstreamResult, UpstreamFailure> {
     let max_attempts = 3;
     let mut last_error = "没有可用账号".to_string();
     let mut last_status = StatusCode::SERVICE_UNAVAILABLE;
+    let mut last_account: Option<(String, String)> = None;
 
     for attempt in 0..max_attempts {
         let (edition, account) = {
@@ -190,16 +215,25 @@ async fn run_with_account(
         let Some(account) = account else {
             // 首次就选不到账号：确实没有可用账号；重试时选不到：说明前面有真实上游错误，透传
             if attempt > 0 && last_error != "没有可用账号" {
-                return Err((last_status, last_error));
+                let (account_id, account_name) = last_account.clone().unwrap_or_default();
+                return Err(UpstreamFailure {
+                    status: last_status,
+                    message: last_error,
+                    account_id,
+                    account_name,
+                });
             }
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
+            return Err(UpstreamFailure {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: format!(
                     "没有可用的{}账号：请先在账号管理页添加账号，或检查账号状态/冷却",
                     crate::editions::edition_of(edition_value).label
                 ),
-            ));
+                account_id: String::new(),
+                account_name: "无可用账号".into(),
+            });
         };
+        last_account = Some((account.id.clone(), account_display_name(&account)));
 
         // token 临期且有刷新令牌时先续期
         let needs_refresh = account
@@ -243,12 +277,8 @@ async fn run_with_account(
             None => {
                 state.accounts.write().await.mark_success(&account.id);
                 return Ok(UpstreamResult {
-                    account_id: account.id,
-                    account_name: if account.name.is_empty() {
-                        if account.email.is_empty() { account.uid.clone() } else { account.email.clone() }
-                    } else {
-                        account.name.clone()
-                    },
+                    account_id: account.id.clone(),
+                    account_name: account_display_name(&account),
                     events,
                 });
             }
@@ -290,12 +320,8 @@ async fn run_with_account(
                         if retry_failed.is_none() {
                             state.accounts.write().await.mark_success(&account.id);
                             return Ok(UpstreamResult {
-                                account_id: account.id,
-                                account_name: if account.name.is_empty() {
-                                    if account.email.is_empty() { account.uid.clone() } else { account.email.clone() }
-                                } else {
-                                    account.name.clone()
-                                },
+                                account_id: account.id.clone(),
+                                account_name: account_display_name(&account),
                                 events: retry_events,
                             });
                         }
@@ -314,7 +340,13 @@ async fn run_with_account(
             }
         }
     }
-    Err((last_status, last_error))
+    let (account_id, account_name) = last_account.unwrap_or_default();
+    Err(UpstreamFailure {
+        status: last_status,
+        message: last_error,
+        account_id,
+        account_name,
+    })
 }
 
 fn parse_status_code(err: &str) -> u16 {
@@ -472,9 +504,22 @@ async fn chat_completions(
     .await;
     let result = match result {
         Ok(r) => r,
-        Err((status, error)) => {
-            record(&edition_value, "", "", &model, None, &messages, "", "chat", started.elapsed().as_millis() as i64, false, &error);
-            return (status, Json(json!({ "error": { "message": error, "type": "api_error", "code": "upstream_error" } }))).into_response();
+        Err(failure) => {
+            let message = failure.message;
+            record(
+                &edition_value,
+                &failure.account_id,
+                &failure.account_name,
+                &model,
+                None,
+                &messages,
+                "",
+                "chat",
+                started.elapsed().as_millis() as i64,
+                false,
+                &message,
+            );
+            return (failure.status, Json(json!({ "error": { "message": message, "type": "api_error", "code": "upstream_error" } }))).into_response();
         }
     };
     let (content, reasoning, tool_calls, usage) = aggregate(&result.events);
@@ -638,9 +683,22 @@ async fn responses(
     .await;
     let result = match result {
         Ok(r) => r,
-        Err((status, error)) => {
-            record(&edition_value, "", "", &model, None, &messages, "", "responses", started.elapsed().as_millis() as i64, false, &error);
-            return (status, Json(json!({ "error": { "message": error, "type": "api_error", "code": "upstream_error" } }))).into_response();
+        Err(failure) => {
+            let message = failure.message;
+            record(
+                &edition_value,
+                &failure.account_id,
+                &failure.account_name,
+                &model,
+                None,
+                &messages,
+                "",
+                "responses",
+                started.elapsed().as_millis() as i64,
+                false,
+                &message,
+            );
+            return (failure.status, Json(json!({ "error": { "message": message, "type": "api_error", "code": "upstream_error" } }))).into_response();
         }
     };
     let (content, reasoning, tool_calls, usage) = aggregate(&result.events);
@@ -750,9 +808,22 @@ async fn messages(
     .await;
     let result = match result {
         Ok(r) => r,
-        Err((status, error)) => {
-            record(&edition_value, "", "", &model, None, &messages, "", "messages", started.elapsed().as_millis() as i64, false, &error);
-            return (status, Json(json!({ "type": "error", "error": { "type": "api_error", "message": error } }))).into_response();
+        Err(failure) => {
+            let message = failure.message;
+            record(
+                &edition_value,
+                &failure.account_id,
+                &failure.account_name,
+                &model,
+                None,
+                &messages,
+                "",
+                "messages",
+                started.elapsed().as_millis() as i64,
+                false,
+                &message,
+            );
+            return (failure.status, Json(json!({ "type": "error", "error": { "type": "api_error", "message": message } }))).into_response();
         }
     };
     let (content, reasoning, tool_calls, usage) = aggregate(&result.events);

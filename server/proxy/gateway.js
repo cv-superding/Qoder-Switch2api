@@ -121,6 +121,8 @@ export function createGateway(edition, getProxyConfig) {
     if (!attempt.ok) {
       recordUsage({
         edition: editionValue,
+        accountId: attempt.account?.id || "",
+        accountName: accountDisplayName(attempt.account),
         model,
         success: false,
         error: attempt.error,
@@ -140,7 +142,7 @@ export function createGateway(edition, getProxyConfig) {
       recordUsage({
         edition: editionValue,
         accountId: account.id,
-        accountName: account.name || account.email || account.uid,
+        accountName: accountDisplayName(account),
         model,
         ...tokens,
         durationMs: Date.now() - started,
@@ -235,7 +237,7 @@ export function createGateway(edition, getProxyConfig) {
     recordUsage({
       edition: editionValue,
       accountId: account.id,
-      accountName: account.name || account.email || account.uid,
+      accountName: accountDisplayName(account),
       model,
       ...tokenUsage(usage, messages, content),
       durationMs: Date.now() - started,
@@ -264,6 +266,8 @@ export function createGateway(edition, getProxyConfig) {
     if (!attempt.ok) {
       recordUsage({
         edition: editionValue,
+        accountId: attempt.account?.id || "",
+        accountName: accountDisplayName(attempt.account),
         model,
         success: false,
         error: attempt.error,
@@ -282,7 +286,7 @@ export function createGateway(edition, getProxyConfig) {
     recordUsage({
       edition: editionValue,
       accountId: account.id,
-      accountName: account.name || account.email || account.uid,
+      accountName: accountDisplayName(account),
       model,
       ...tokens,
       durationMs: Date.now() - started,
@@ -363,6 +367,8 @@ export function createGateway(edition, getProxyConfig) {
     if (!attempt.ok) {
       recordUsage({
         edition: editionValue,
+        accountId: attempt.account?.id || "",
+        accountName: accountDisplayName(attempt.account),
         model,
         success: false,
         error: attempt.error,
@@ -380,7 +386,7 @@ export function createGateway(edition, getProxyConfig) {
     recordUsage({
       edition: editionValue,
       accountId: account.id,
-      accountName: account.name || account.email || account.uid,
+      accountName: accountDisplayName(account),
       model,
       ...tokens,
       durationMs: Date.now() - started,
@@ -457,15 +463,17 @@ async function runWithAccount(edition, model, req) {
   const maxAttempts = 3;
   let lastError = "没有可用账号";
   let lastStatus = 503;
+  let lastAccount = null;
   for (let i = 0; i < maxAttempts; i += 1) {
     const account = accountManager.pick(editionValue);
     if (!account) {
       // 已经发生过真实上游错误时，把真实错误/状态码透传给客户端，而不是统一吞成 503
       if (i > 0 && lastError && lastError !== "没有可用账号") {
-        return { ok: false, error: lastError, status: lastStatus };
+        return { ok: false, error: lastError, status: lastStatus, account: lastAccount };
       }
-      return { ok: false, error: `没有可用的${edition.label}账号：请先在账号管理页添加账号，或检查账号状态/冷却`, status: 503 };
+      return { ok: false, error: `没有可用的${edition.label}账号：请先在账号管理页添加账号，或检查账号状态/冷却`, status: 503, account: null };
     }
+    lastAccount = account;
     // token 即将过期且有刷新令牌时先续期
     if (account.tokenExpireAt && account.tokenExpireAt < Date.now() + 5 * 60 * 1000 && account.refreshToken) {
       await accountManager.tryRefresh(account.id);
@@ -534,7 +542,21 @@ async function runWithAccount(edition, model, req) {
     lastError = failed;
     lastStatus = statusCode >= 400 && statusCode < 600 ? statusCode : 502;
   }
-  return { ok: false, error: lastError, status: lastStatus };
+  return { ok: false, error: lastError, status: lastStatus, account: lastAccount };
+}
+
+/** 用量记账里的账号显示名：名称缺失时逐级回退，避免出现「未知账号」 */
+function accountDisplayName(account) {
+  if (!account) return "无可用账号";
+  return (
+    account.name ||
+    account.email ||
+    account.phone ||
+    account.label ||
+    account.uid ||
+    account.id ||
+    "未知账号"
+  );
 }
 
 /* ================================================================= */
