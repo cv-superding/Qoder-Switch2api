@@ -15,7 +15,6 @@ import { accountManager } from "../qoder/account.js";
 import { streamChat, normalizeModelKey } from "../qoder/chat.js";
 import { fetchModelList } from "../qoder/info.js";
 import { recordUsage, usageStats } from "./usage.js";
-import { EDITIONS } from "../editions.js";
 import { loadJson, saveJson } from "../store.js";
 import { randomUUID } from "node:crypto";
 
@@ -110,7 +109,7 @@ export function createGateway(edition, getProxyConfig) {
     const messages = normalizeMessages(body.messages || []);
     const imageUrls = collectImageUrls(messages);
 
-    const attempt = await runWithAccount(editionValue, model, {
+    const attempt = await runWithAccount(edition, model, {
       messages,
       tools: body.tools,
       reasoningEffort: body.reasoning_effort,
@@ -137,12 +136,13 @@ export function createGateway(edition, getProxyConfig) {
 
     if (!wantStream) {
       const { content, reasoning, toolCalls, usage } = aggregate(events);
+      const tokens = tokenUsage(usage, messages, content);
       recordUsage({
         edition: editionValue,
         accountId: account.id,
         accountName: account.name || account.email || account.uid,
         model,
-        ...tokenUsage(usage, messages, content),
+        ...tokens,
         durationMs: Date.now() - started,
         success: true,
         api: "chat",
@@ -165,9 +165,9 @@ export function createGateway(edition, getProxyConfig) {
           },
         ],
         usage: {
-          prompt_tokens: usage?.promptTokens || 0,
-          completion_tokens: usage?.completionTokens || 0,
-          total_tokens: usage?.totalTokens || 0,
+          prompt_tokens: tokens.promptTokens,
+          completion_tokens: tokens.completionTokens,
+          total_tokens: tokens.totalTokens,
         },
       });
     }
@@ -260,7 +260,7 @@ export function createGateway(edition, getProxyConfig) {
     const imageUrls = collectImageUrls(messages);
     const wantStream = Boolean(body.stream);
 
-    const attempt = await runWithAccount(editionValue, model, { messages, tools: body.tools, imageUrls, api: "responses" });
+    const attempt = await runWithAccount(edition, model, { messages, tools: body.tools, imageUrls, api: "responses" });
     if (!attempt.ok) {
       recordUsage({
         edition: editionValue,
@@ -276,6 +276,7 @@ export function createGateway(edition, getProxyConfig) {
     }
     const { account, events } = attempt;
     const { content, reasoning, toolCalls, usage } = aggregate(events);
+    const tokens = tokenUsage(usage, messages, content);
     const responseId = `resp-${randomUUID()}`;
     const createdAt = Math.floor(Date.now() / 1000);
     recordUsage({
@@ -283,7 +284,7 @@ export function createGateway(edition, getProxyConfig) {
       accountId: account.id,
       accountName: account.name || account.email || account.uid,
       model,
-      ...tokenUsage(usage, messages, content),
+      ...tokens,
       durationMs: Date.now() - started,
       success: true,
       api: "responses",
@@ -312,9 +313,9 @@ export function createGateway(edition, getProxyConfig) {
         model,
         output,
         usage: {
-          input_tokens: usage?.promptTokens || 0,
-          output_tokens: usage?.completionTokens || 0,
-          total_tokens: usage?.totalTokens || 0,
+          input_tokens: tokens.promptTokens,
+          output_tokens: tokens.completionTokens,
+          total_tokens: tokens.totalTokens,
         },
       });
     }
@@ -336,7 +337,7 @@ export function createGateway(edition, getProxyConfig) {
     }
     send("response.completed", {
       type: "response.completed",
-      response: { id: responseId, status: "completed", model, output, usage: { input_tokens: usage?.promptTokens || 0, output_tokens: usage?.completionTokens || 0, total_tokens: usage?.totalTokens || 0 } },
+      response: { id: responseId, status: "completed", model, output, usage: { input_tokens: tokens.promptTokens, output_tokens: tokens.completionTokens, total_tokens: tokens.totalTokens } },
     });
     res.write("data: [DONE]\n\n");
     res.end();
@@ -358,7 +359,7 @@ export function createGateway(edition, getProxyConfig) {
     const imageUrls = collectImageUrls(messages);
     const wantStream = Boolean(body.stream);
 
-    const attempt = await runWithAccount(editionValue, model, { messages, tools: body.tools, imageUrls, api: "messages" });
+    const attempt = await runWithAccount(edition, model, { messages, tools: body.tools, imageUrls, api: "messages" });
     if (!attempt.ok) {
       recordUsage({
         edition: editionValue,
@@ -374,13 +375,14 @@ export function createGateway(edition, getProxyConfig) {
     }
     const { account, events } = attempt;
     const { content, reasoning, toolCalls, usage } = aggregate(events);
+    const tokens = tokenUsage(usage, messages, content);
     const msgId = `msg-${randomUUID()}`;
     recordUsage({
       edition: editionValue,
       accountId: account.id,
       accountName: account.name || account.email || account.uid,
       model,
-      ...tokenUsage(usage, messages, content),
+      ...tokens,
       durationMs: Date.now() - started,
       success: true,
       api: "messages",
@@ -403,8 +405,8 @@ export function createGateway(edition, getProxyConfig) {
         content: contentBlocks,
         stop_reason: toolCalls.length > 0 ? "tool_use" : "end_turn",
         usage: {
-          input_tokens: usage?.promptTokens || 0,
-          output_tokens: usage?.completionTokens || 0,
+          input_tokens: tokens.promptTokens,
+          output_tokens: tokens.completionTokens,
         },
       });
     }
@@ -416,7 +418,7 @@ export function createGateway(edition, getProxyConfig) {
     const send = (type, obj) => res.write(`event: ${type}\ndata: ${JSON.stringify(obj)}\n\n`);
     send("message_start", {
       type: "message_start",
-      message: { id: msgId, type: "message", role: "assistant", model, content: [], usage: { input_tokens: usage?.promptTokens || 0, output_tokens: 0 } },
+      message: { id: msgId, type: "message", role: "assistant", model, content: [], usage: { input_tokens: tokens.promptTokens, output_tokens: 0 } },
     });
     contentBlocks.forEach((block, index) => {
       send("content_block_start", { type: "content_block_start", index, content_block: { type: "", ...block } });
@@ -432,7 +434,7 @@ export function createGateway(edition, getProxyConfig) {
     send("message_delta", {
       type: "message_delta",
       delta: { stop_reason: toolCalls.length > 0 ? "tool_use" : "end_turn" },
-      usage: { output_tokens: usage?.completionTokens || 0 },
+      usage: { output_tokens: tokens.completionTokens },
     });
     send("message_stop", { type: "message_stop" });
     res.end();
@@ -450,14 +452,18 @@ export function createGateway(edition, getProxyConfig) {
 /* 账号选择与上游调用                                                  */
 /* ================================================================= */
 
-async function runWithAccount(editionValue, model, req) {
-  const edition = EDITIONS[editionValue] || EDITIONS.domestic;
+async function runWithAccount(edition, model, req) {
+  const editionValue = edition.value;
   const maxAttempts = 3;
   let lastError = "没有可用账号";
   let lastStatus = 503;
   for (let i = 0; i < maxAttempts; i += 1) {
     const account = accountManager.pick(editionValue);
     if (!account) {
+      // 已经发生过真实上游错误时，把真实错误/状态码透传给客户端，而不是统一吞成 503
+      if (i > 0 && lastError && lastError !== "没有可用账号") {
+        return { ok: false, error: lastError, status: lastStatus };
+      }
       return { ok: false, error: `没有可用的${edition.label}账号：请先在账号管理页添加账号，或检查账号状态/冷却`, status: 503 };
     }
     // token 即将过期且有刷新令牌时先续期

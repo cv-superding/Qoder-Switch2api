@@ -65,23 +65,13 @@ pub fn record_usage(entry: UsageRecord) {
 }
 
 fn day_key(ts: i64) -> String {
-    let secs = ts / 1000;
-    let days = secs / 86400;
-    let (y, m, d) = civil_from_days(days);
-    format!("{:04}-{:02}-{:02}", y, m, d)
-}
-
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .unwrap_or_else(Local::now)
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -152,8 +142,8 @@ pub fn usage_stats(edition: Option<&str>) -> UsageStats {
     let mut by_api: Vec<NamedBucket> = by_api.into_iter().map(|(name, bucket)| NamedBucket { name, bucket }).collect();
     by_api.sort_by(|a, b| b.bucket.requests.cmp(&a.bucket.requests));
     let daily: Vec<NamedBucket> = by_day.into_iter().rev().take(30).collect::<Vec<_>>().into_iter().rev().map(|(name, bucket)| NamedBucket { name, bucket }).collect();
-    let mut recent: Vec<UsageRecord> = records.iter().rev().take(50).map(|r| (*r).clone()).collect();
-    recent.reverse();
+    // 与 Node 版一致：最新记录在前
+    let recent: Vec<UsageRecord> = records.iter().rev().take(50).map(|r| (*r).clone()).collect();
 
     UsageStats {
         totals,

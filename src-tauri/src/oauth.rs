@@ -182,7 +182,7 @@ pub async fn poll_login(login_id: &str) -> LoginOutcome {
         .append_pair("verifier", &state.verifier)
         .append_pair("challenge_method", "S256");
 
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let resp = match client.get(poll_url.as_str()).send().await {
         Ok(r) => r,
         Err(e) => {
@@ -437,6 +437,13 @@ pub struct RefreshResult {
     pub refresh_token: Option<String>,
     #[serde(alias = "expires_at", alias = "expireTime")]
     pub expires_at: Option<serde_json::Value>,
+    #[serde(
+        default,
+        alias = "refresh_token_expires_at",
+        alias = "refreshTokenExpiresAt",
+        alias = "refreshTokenExpireAt"
+    )]
+    pub refresh_token_expires_at: Option<serde_json::Value>,
 }
 
 /// 用 refresh_token 续期
@@ -447,7 +454,7 @@ pub async fn refresh_token(
     if account.refresh_token.is_empty() {
         return Err("账号没有 refresh_token，无法续期，请重新登录".into());
     }
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let resp = client
         .post(format!(
             "{}{}",
@@ -473,5 +480,6 @@ pub async fn refresh_token(
         security_oauth_token: result.security_oauth_token,
         refresh_token: Some(result.refresh_token.unwrap_or_else(|| account.refresh_token.clone())),
         expires_at: Some(result.expires_at.unwrap_or(serde_json::Value::Null)),
+        refresh_token_expires_at: result.refresh_token_expires_at,
     })
 }

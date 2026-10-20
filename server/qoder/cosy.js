@@ -113,7 +113,7 @@ export function buildLegacyStreamHeaders({ account, edition, requestPath, reques
   // machine token/type 缺失时生成随机值（与 qoder2api 参考实现一致）
   const machineToken = account.machineToken || randomMachineToken();
   const machineType = account.machineType || randomHex(18);
-  const machineId = account.machineId || randomUUID();
+  const machineId = account.machineId || uuid();
   const cosy = buildCosyHeaders({
     token: account.securityOauthToken,
     userId: account.uid,

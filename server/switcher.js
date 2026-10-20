@@ -196,21 +196,36 @@ function normalizeAuth(json, source, dir) {
 export async function switchClientAccount(accountId, { restart = true, onStep } = {}) {
   const account = accountManager.get(accountId);
   if (!account) throw new Error("账号不存在");
+  if (!account.securityOauthToken) {
+    throw new Error("该账号没有 Qoder 客户端登录 Token（PAT / 备份占位账号不支持切换），请先重新登录");
+  }
   const edition = EDITIONS[account.edition] || EDITIONS.domestic;
   const settings = globalSettings;
   const dir = resolveClientDir(edition, settings.clientDirOverrides?.[account.edition]);
   const authDat = authDatPath(dir);
   const vscdb = globalStorageDb(dir);
+  if (!fs.existsSync(authDat) && !fs.existsSync(vscdb)) {
+    throw new Error("未找到客户端登录态文件，请先打开 Qoder 并登录一次，再执行切换");
+  }
 
   const step = (name, status, detail) => onStep?.({ name, status, detail });
+  const exe = await resolveClientExe(edition, settings, settings.clientDirOverrides?.[account.edition]);
 
   step("备份当前登录态", "running");
   const backup = await backupClientAuth(dir, authDat, vscdb);
   step("备份当前登录态", "done", backup ? `已备份到 ${path.basename(backup)}` : "无现有登录态，跳过备份");
 
   step("结束 Qoder 进程", "running");
-  const killed = await killClientProcesses(edition, settings);
-  step("结束 Qoder 进程", "done", killed ? `已结束 ${killed} 个进程` : "未发现运行中的客户端");
+  const killed = await killClientProcesses(exe);
+  step(
+    "结束 Qoder 进程",
+    "done",
+    killed > 0
+      ? `已结束 ${killed} 个进程`
+      : exe
+        ? "未发现运行中的客户端进程"
+        : "未定位客户端可执行文件，已跳过结束进程（请手动关闭 Qoder 后重试）",
+  );
 
   step("写入目标账号", "running");
   if (fs.existsSync(authDat)) {
@@ -234,7 +249,6 @@ export async function switchClientAccount(accountId, { restart = true, onStep } 
 
   if (restart) {
     step("重启 Qoder", "running");
-    const exe = settings.clientExePaths?.[account.edition] || (await findClientExe(edition));
     if (exe) {
       await launchClient(exe);
       step("重启 Qoder", "done", `已启动 ${path.basename(exe)}`);
@@ -276,17 +290,18 @@ async function writeAuthDat(dir, authDat, account) {
     ...base,
     schemaVersion: base.schemaVersion ?? 1,
     token: account.securityOauthToken,
-    refreshToken: account.refreshToken || base.refreshToken || "",
-    expiresAt: account.tokenExpireAt ? formatExpire(account.tokenExpireAt, useIso) : base.expiresAt,
+    // 切换账号时必须写入目标账号自己的值，不能沿用上一个账号的凭证/身份
+    refreshToken: account.refreshToken || "",
+    expiresAt: account.tokenExpireAt ? formatExpire(account.tokenExpireAt, useIso) : null,
     refreshTokenExpiresAt: account.refreshTokenExpiresAt
       ? formatExpire(account.refreshTokenExpiresAt, useIso)
-      : base.refreshTokenExpiresAt,
+      : null,
     user: {
       ...(base.user || {}),
-      id: account.uid || base.user?.id || "",
-      name: account.name || base.user?.name || "",
-      email: account.email || base.user?.email || "",
-      phone: account.phone || base.user?.phone || "",
+      id: account.uid || "",
+      name: account.name || "",
+      email: account.email || "",
+      phone: account.phone || "",
     },
   };
   const encrypted = oscryptEncrypt(key, JSON.stringify(auth));
@@ -300,55 +315,61 @@ function formatExpire(ms, useIso) {
   return ms;
 }
 
+function mergeClientAuthJson(base, account) {
+  const obj = base && typeof base === "object" ? base : {};
+  return {
+    ...obj,
+    token: account.securityOauthToken,
+    refreshToken: account.refreshToken || "",
+    expiresAt: account.tokenExpireAt ?? null,
+    refreshTokenExpiresAt: account.refreshTokenExpiresAt ?? null,
+    uid: account.uid || "",
+    user: {
+      ...(obj.user || {}),
+      id: account.uid || "",
+      name: account.name || "",
+      email: account.email || "",
+      phone: account.phone || "",
+    },
+  };
+}
+
 async function writeVscdbAuth(vscdb, account) {
   const sqlite = await getSqlite();
   if (!sqlite) throw new Error("当前 Node 不支持 node:sqlite，无法写 state.vscdb");
   const db = new sqlite.DatabaseSync(vscdb, { readOnly: false });
   try {
     const row = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("secret://aicoding.auth.userInfo");
-    let value;
-    if (row?.value) {
-      const existing = Buffer.isBuffer(row.value) ? row.value : Buffer.from(String(row.value), "utf8");
-      if (existing.length > 3 && existing.subarray(0, 3).toString("utf8") === "v10") {
-        // 加密态：需要 OSCrypt 密钥重写
+    const existing = row?.value
+      ? Buffer.isBuffer(row.value)
+        ? row.value
+        : Buffer.from(String(row.value), "utf8")
+      : null;
+    const encrypted = Boolean(existing && existing.length > 3 && existing.subarray(0, 3).toString("utf8") === "v10");
+    let base = {};
+    let key = null;
+    if (existing) {
+      if (encrypted) {
         const dir = path.dirname(path.dirname(path.dirname(vscdb))); // .../User/globalStorage -> client dir
-        const key = await loadOscryptKey(dir);
+        key = await loadOscryptKey(dir);
         if (!key) throw new Error("无法解出 OSCrypt 密钥，写入取消");
-        let json;
         try {
-          json = JSON.parse(oscryptDecrypt(key, existing).toString("utf8"));
+          base = JSON.parse(oscryptDecrypt(key, existing).toString("utf8"));
         } catch {
-          json = {};
+          base = {};
         }
-        const merged = {
-          ...json,
-          token: account.securityOauthToken,
-          refreshToken: account.refreshToken || json.refreshToken || "",
-          expiresAt: account.tokenExpireAt ?? json.expiresAt,
-          refreshTokenExpiresAt: account.refreshTokenExpiresAt ?? json.refreshTokenExpiresAt,
-          uid: account.uid || json.uid,
-          user: {
-            ...(json.user || {}),
-            id: account.uid || json.user?.id || "",
-            name: account.name || json.user?.name || "",
-            email: account.email || json.user?.email || "",
-          },
-        };
-        value = oscryptEncrypt(key, JSON.stringify(merged));
       } else {
-        value = existing; // 非加密格式不猜结构，保持原样（token 由 auth.v1.dat 路径覆盖的场景很少）
+        try {
+          base = JSON.parse(existing.toString("utf8"));
+        } catch {
+          base = {};
+        }
       }
-    } else {
-      value = Buffer.from(
-        JSON.stringify({
-          token: account.securityOauthToken,
-          refreshToken: account.refreshToken,
-          uid: account.uid,
-          user: { id: account.uid, name: account.name, email: account.email },
-        }),
-        "utf8",
-      );
     }
+    const merged = mergeClientAuthJson(base, account);
+    const value = encrypted && key
+      ? oscryptEncrypt(key, JSON.stringify(merged))
+      : Buffer.from(JSON.stringify(merged), "utf8");
     db.prepare("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)").run(
       "secret://aicoding.auth.userInfo",
       value,
@@ -362,41 +383,86 @@ async function writeVscdbAuth(vscdb, account) {
 /* 进程管理                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 结束客户端进程，返回结束的进程数 */
-export async function killClientProcesses(edition, settings = {}) {
-  const names = [...new Set([...edition.clientProcessNames, "Qoder"])];
-  let count = 0;
+/**
+ * 解析客户端可执行文件。设置了数据目录覆盖时只在覆盖目录内查找，
+ * 避免把机器上其它 Qoder 安装（例如自定义目录/测试目录）误判为目标客户端。
+ */
+export async function resolveClientExe(edition, settings = {}, overrideDir = "") {
+  const configured = String(settings.clientExePaths?.[edition.value] || "").trim();
+  if (configured) return configured;
+  if (overrideDir) {
+    const candidates = [
+      path.join(overrideDir, "Qoder.exe"),
+      path.join(path.dirname(overrideDir), "Qoder.exe"),
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    return "";
+  }
+  return (await findClientExe(edition)) || "";
+}
+
+/**
+ * 结束指定客户端进程。
+ * 只按可执行文件的绝对路径精确匹配，绝不按进程名全局 taskkill / pkill，
+ * 避免误杀其它 Qoder 安装或无关进程。
+ */
+export async function killClientProcesses(exePath) {
+  const target = String(exePath || "").trim();
+  if (!target) return 0;
   if (process.platform === "win32") {
-    for (const name of names) {
+    const script = `
+$targets = @()
+foreach ($p in ($env:QODER_TARGET_EXE -split ';;')) {
+  if ($p) { try { $targets += [IO.Path]::GetFullPath($p).ToLower() } catch {} }
+}
+$pids = @()
+foreach ($proc in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
+  if (-not $proc.ExecutablePath) { continue }
+  try { $full = [IO.Path]::GetFullPath($proc.ExecutablePath).ToLower() } catch { continue }
+  if ($targets -contains $full) { $pids += $proc.ProcessId }
+}
+$pids -join ","
+`.trim();
+    let pids = [];
+    try {
+      const { stdout } = await execFileAsync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", script],
+        { encoding: "utf8", windowsHide: true, maxBuffer: 1024 * 1024, env: { ...process.env, QODER_TARGET_EXE: target } },
+      );
+      pids = String(stdout).trim().split(",").map((s) => s.trim()).filter(Boolean);
+    } catch {
+      return 0;
+    }
+    let count = 0;
+    for (const pid of pids) {
       try {
-        const { stdout } = await execFileAsync("tasklist", ["/FI", `IMAGENAME eq ${name}.exe`, "/NH"], {
-          encoding: "utf8",
-          windowsHide: true,
-        });
-        if (stdout.includes(name)) {
-          await execFileAsync("taskkill", ["/F", "/IM", `${name}.exe`], { encoding: "utf8", windowsHide: true }).catch(
-            () => {},
-          );
-          count += 1;
-        }
+        await execFileAsync("taskkill", ["/F", "/PID", pid], { windowsHide: true });
+        count += 1;
       } catch {
-        /* ignore */
+        /* 进程可能已退出 */
       }
     }
-  } else {
-    const { exec } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const execAsync = promisify(exec);
-    for (const name of names) {
+    return count;
+  }
+  try {
+    const { stdout } = await execFileAsync("pgrep", ["-f", target], { encoding: "utf8" });
+    const pids = String(stdout).split("\n").map((s) => s.trim()).filter(Boolean);
+    let count = 0;
+    for (const pid of pids) {
       try {
-        await execAsync(`pkill -f "${name}" || true`);
+        process.kill(Number(pid), "SIGKILL");
         count += 1;
       } catch {
         /* ignore */
       }
     }
+    return count;
+  } catch {
+    return 0;
   }
-  return count;
 }
 
 async function launchClient(exePath) {

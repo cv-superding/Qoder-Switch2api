@@ -59,6 +59,7 @@ pub fn normalize_model_key(model: &str) -> String {
 
 fn normalize_content(content: &Value) -> String {
     match content {
+        Value::Null => String::new(),
         Value::String(s) => s.clone(),
         Value::Array(arr) => {
             let mut parts = Vec::new();
@@ -372,6 +373,19 @@ fn build_legacy_request(req: &ChatRequest) -> Value {
     body
 }
 
+fn error_text(value: &Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    value
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("error").and_then(|v| v.as_str()))
+        .or_else(|| value.get("error").and_then(|v| v.get("message")).and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string()
+}
+
 fn parse_legacy_line(data: &str) -> Vec<ChatEvent> {
     if data.is_empty() || data == "[DONE]" {
         return Vec::new();
@@ -380,13 +394,42 @@ fn parse_legacy_line(data: &str) -> Vec<ChatEvent> {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
-    let Some(body_str) = envelope.get("body").and_then(|v| v.as_str()) else {
+    let status_code = envelope
+        .get("statusCodeValue")
+        .or_else(|| envelope.get("statusCode"))
+        .or_else(|| envelope.get("status"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let chunk = envelope
+        .get("body")
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .or_else(|| if v.is_object() { Some(v.clone()) } else { None })
+        })
+        .unwrap_or(Value::Null);
+    let chunk_error = if chunk.is_null() {
+        String::new()
+    } else {
+        error_text(chunk.get("error").unwrap_or(&Value::Null))
+    };
+    if status_code >= 400 || !chunk_error.is_empty() {
+        let detail = if !chunk_error.is_empty() {
+            chunk_error
+        } else if !chunk.is_null() {
+            error_text(&chunk)
+        } else {
+            error_text(&envelope)
+        };
+        return vec![ChatEvent::Error(format!(
+            "上游 HTTP {}: {}",
+            if status_code >= 400 { status_code.to_string() } else { "?".into() },
+            detail.chars().take(300).collect::<String>()
+        ))];
+    }
+    if chunk.is_null() {
         return Vec::new();
-    };
-    let chunk: Value = match serde_json::from_str(body_str) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+    }
     let mut events = Vec::new();
     if let Some(choices) = chunk.get("choices").and_then(|v| v.as_array()) {
         for choice in choices {
@@ -453,7 +496,11 @@ fn legacy_stream(
             }
         }
         // 与 Node 版请求完全对齐：HTTP/1.1、accept 头、无多余自定义头
-        let client = match reqwest::Client::builder().http1_only().build() {
+        let client = match reqwest::Client::builder()
+            .http1_only()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .build()
+        {
             Ok(c) => c,
             Err(e) => {
                 yield ChatEvent::Error(format!("HTTP 客户端初始化失败: {}", e));
@@ -543,7 +590,7 @@ impl CloudSession {
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, String> {
-        let resp = reqwest::Client::new()
+        let resp = crate::http::client()
             .get(format!("{}{}", self.base_url, path))
             .header("Authorization", format!("Bearer {}", self.pat))
             .send()
@@ -558,7 +605,7 @@ impl CloudSession {
     }
 
     async fn post_json(&self, path: &str, body: &Value) -> Result<Option<Value>, String> {
-        let resp = reqwest::Client::new()
+        let resp = crate::http::client()
             .post(format!("{}{}", self.base_url, path))
             .header("Authorization", format!("Bearer {}", self.pat))
             .header("Content-Type", "application/json")
@@ -722,7 +769,7 @@ fn cloud_stream(req: ChatRequest, edition: Edition) -> impl Stream<Item = ChatEv
         }
 
         let url = format!("{}/sessions/{}/events/stream", session.base_url, session_id);
-        let client = reqwest::Client::new();
+        let client = crate::http::stream_client();
         let resp = match client
             .get(&url)
             .header("Authorization", format!("Bearer {}", session.pat))
@@ -746,15 +793,20 @@ fn cloud_stream(req: ChatRequest, edition: Edition) -> impl Stream<Item = ChatEv
         let mut event_type = String::new();
         let mut data_line = String::new();
         let mut stream = resp.bytes_stream();
+        let read_timeout = std::time::Duration::from_millis(if req.timeout_ms > 0 { req.timeout_ms } else { 300_000 });
         use futures_util::StreamExt;
         loop {
-            let chunk = match stream.next().await {
-                Some(Ok(c)) => c,
-                Some(Err(e)) => {
+            let chunk = match tokio::time::timeout(read_timeout, stream.next()).await {
+                Ok(Some(Ok(c))) => c,
+                Ok(Some(Err(e))) => {
                     yield ChatEvent::Error(format!("读取流失败: {}", e));
                     return;
                 }
-                None => break,
+                Ok(None) => break,
+                Err(_) => {
+                    yield ChatEvent::Error("读取流超时".into());
+                    return;
+                }
             };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             while let Some(idx) = buffer.find('\n') {

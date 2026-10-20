@@ -95,6 +95,7 @@ export default function AccountsPage() {
     (a) => a.status === "needs_relogin" || a.cooling || (typeof a.tokenExpireAt === "number" && a.tokenExpireAt < Date.now()),
   ).length;
   const checkedToday = editionAccounts.filter((a) => checkinMap[a.id]).length;
+  const checkinTargets = editionAccounts.filter((a) => a.hasToken || a.hasPat);
 
   /** 按紧急程度排序：需重登录 > 额度将尽 > 冷却中 > 其他 */
   const orderedAccounts = useMemo(() => {
@@ -198,12 +199,17 @@ export default function AccountsPage() {
 
   async function onRefreshCredits() {
     if (editionAccounts.length === 0) return;
+    if (checkinTargets.length === 0) {
+      await refreshCredits(editionAccounts.map((a) => a.id));
+      toast.info("没有可签到的账号", { description: "账号缺少登录凭证，请先重新登录或导入登录态" });
+      return;
+    }
     let success = 0;
     let already = 0;
     let none = 0;
     let failed = 0;
     try {
-      const res = await api.api.checkinAll(editionAccounts.map((a) => a.id));
+      const res = await api.api.checkinAll(checkinTargets.map((a) => a.id));
       success = res.accounts.filter((e) => e.result === "success").length;
       already = res.accounts.filter((e) => e.result === "already").length;
       none = res.accounts.filter((e) => e.result === "none").length;
@@ -379,7 +385,7 @@ export default function AccountsPage() {
               variant="outline"
               size="sm"
               className="h-8"
-              disabled={refreshingCredits || editionAccounts.length === 0}
+              disabled={refreshingCredits || checkinTargets.length === 0}
               onClick={() => void onRefreshCredits()}
             >
               <RefreshCw className={cn(refreshingCredits && "animate-spin")} />

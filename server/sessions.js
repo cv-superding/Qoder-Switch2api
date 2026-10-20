@@ -105,13 +105,19 @@ export async function getChatHistory(editionValue, workspaceId, settings = {}) {
       .get(`lingma.chat.localHistory.${workspaceId}`);
     if (!row?.value) return [];
     const history = JSON.parse(String(row.value));
-    return (Array.isArray(history) ? history : []).map((h) => ({
-      id: h.id || "",
-      title: h.title || "未命名对话",
-      timestamp: h.timestamp ?? null,
-      sessionId: h.sessionId || "",
-      contexts: (h.context || []).map((c) => ({ id: c.id || "", name: c.name || "", type: c.type || "" })),
-    }));
+    return (Array.isArray(history) ? history : []).map((raw) => {
+      const h = raw && typeof raw === "object" ? raw : {};
+      const contexts = Array.isArray(h.context) ? h.context : [];
+      return {
+        id: h.id || "",
+        title: h.title || "未命名对话",
+        timestamp: h.timestamp ?? null,
+        sessionId: h.sessionId || "",
+        contexts: contexts
+          .filter((c) => c && typeof c === "object")
+          .map((c) => ({ id: c.id || "", name: c.name || "", type: c.type || "" })),
+      };
+    });
   } finally {
     database.close();
   }
@@ -123,9 +129,10 @@ export async function exportChatHistory(editionValue, workspaceId, settings = {}
   const exportDir = path.join(dataDir(), "exports");
   fs.mkdirSync(exportDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const jsonPath = path.join(exportDir, `qoder-chats-${workspaceId}-${stamp}.json`);
+  const safeId = String(workspaceId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
+  const jsonPath = path.join(exportDir, `qoder-chats-${safeId}-${stamp}.json`);
   fs.writeFileSync(jsonPath, JSON.stringify(chats, null, 2), "utf8");
-  const mdPath = path.join(exportDir, `qoder-chats-${workspaceId}-${stamp}.md`);
+  const mdPath = path.join(exportDir, `qoder-chats-${safeId}-${stamp}.md`);
   const lines = [`# Qoder 会话导出（工作区 ${workspaceId}）`, ""];
   for (const chat of chats) {
     const when = chat.timestamp ? new Date(chat.timestamp).toLocaleString("zh-CN") : "未知时间";

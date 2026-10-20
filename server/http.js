@@ -36,17 +36,23 @@ export async function openSse(url, { method = "POST", headers = {}, body, timeou
   if (timeoutMs > 0) {
     timer = setTimeout(() => controller.abort(), timeoutMs);
   }
-  const resp = await fetch(url, {
-    method,
-    headers: {
-      "cache-control": "no-cache",
-      accept: "text/event-stream",
-      "accept-encoding": "identity",
-      ...headers,
-    },
-    body: body == null ? undefined : typeof body === "string" ? body : JSON.stringify(body),
-    signal: controller.signal,
-  });
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method,
+      headers: {
+        "cache-control": "no-cache",
+        accept: "text/event-stream",
+        "accept-encoding": "identity",
+        ...headers,
+      },
+      body: body == null ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (timer) clearTimeout(timer);
+    throw e;
+  }
   if (!resp.ok || !resp.body) {
     const text = await resp.text().catch(() => "");
     if (timer) clearTimeout(timer);

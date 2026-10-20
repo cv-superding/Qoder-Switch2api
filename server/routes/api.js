@@ -320,7 +320,7 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
       settings.proxy[value] = {
         ...current,
         ...next,
-        enabled: Boolean(next.enabled),
+        enabled: next.enabled === undefined ? Boolean(current.enabled) : Boolean(next.enabled),
         listen: String(next.listen || current.listen),
         apiKey: String(next.apiKey ?? current.apiKey ?? ""),
         extraModels: Array.isArray(next.extraModels) ? next.extraModels.map((m) => String(m).trim()).filter(Boolean) : current.extraModels,
@@ -407,9 +407,10 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
       };
     }
     if (incoming.autoCheckin) {
+      const hour = Number(incoming.autoCheckin.hour);
       settings.autoCheckin = {
         enabled: Boolean(incoming.autoCheckin.enabled),
-        hour: Number.isFinite(Number(incoming.autoCheckin.hour)) ? Number(incoming.autoCheckin.hour) : 9,
+        hour: Number.isFinite(hour) ? Math.max(0, Math.min(23, Math.round(hour))) : 9,
       };
     }
     if (incoming.endpointOverrides) {

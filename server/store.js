@@ -7,8 +7,6 @@ import path from "node:path";
 import { encryptSecret, decryptSecret } from "./crypto.js";
 import { dataFile, ensureDataDir } from "./paths.js";
 
-const cache = new Map();
-
 function readRaw(file) {
   try {
     return fs.readFileSync(file, "utf8");
@@ -17,16 +15,18 @@ function readRaw(file) {
   }
 }
 
-/** 读取 JSON 配置文件；不存在时返回 null */
+function atomicWrite(file, data) {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+  fs.writeFileSync(tmp, data, "utf8");
+  fs.renameSync(tmp, file);
+}
+
+/** 读取 JSON 配置文件；不存在时返回 fallback。不缓存，确保多进程 / 双模式读写一致 */
 export function loadJson(name, fallback = null) {
-  const file = dataFile(name);
-  if (cache.has(name)) return cache.get(name);
-  const raw = readRaw(file);
+  const raw = readRaw(dataFile(name));
   if (raw == null) return fallback;
   try {
-    const value = JSON.parse(raw);
-    cache.set(name, value);
-    return value;
+    return JSON.parse(raw);
   } catch {
     return fallback;
   }
@@ -35,11 +35,7 @@ export function loadJson(name, fallback = null) {
 /** 写入 JSON 配置文件（明文，非敏感） */
 export function saveJson(name, value) {
   ensureDataDir();
-  const file = dataFile(name);
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
-  fs.renameSync(tmp, file);
-  cache.set(name, value);
+  atomicWrite(dataFile(name), JSON.stringify(value, null, 2));
   return value;
 }
 
@@ -66,10 +62,7 @@ export function loadEncrypted(name, fallback = null) {
 /** 写入加密的敏感数据 */
 export function saveEncrypted(name, value) {
   ensureDataDir();
-  const file = dataFile(name);
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, encryptSecret(JSON.stringify(value)), "utf8");
-  fs.renameSync(tmp, file);
+  atomicWrite(dataFile(name), encryptSecret(JSON.stringify(value)));
   return value;
 }
 
@@ -102,8 +95,4 @@ export function readJsonl(name, limit = 500) {
 
 export function dataFilePath(name) {
   return path.join(dataFile(name));
-}
-
-export function invalidate(name) {
-  cache.delete(name);
 }

@@ -94,7 +94,8 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Arc<Self> {
         let accounts = AccountManager::load();
-        let settings = crate::store::load_json::<Settings>("settings.json");
+        let mut settings = crate::store::load_json::<Settings>("settings.json");
+        settings.auto_checkin.hour = settings.auto_checkin.hour.clamp(0, 23);
         Arc::new(AppState {
             accounts: RwLock::new(accounts),
             settings: RwLock::new(settings),

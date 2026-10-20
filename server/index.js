@@ -58,6 +58,11 @@ settings.proxy = {
   domestic: { ...defaultSettings().proxy.domestic, ...(settings.proxy?.domestic || {}) },
   international: { ...defaultSettings().proxy.international, ...(settings.proxy?.international || {}) },
 };
+const configuredHour = Number(settings.autoCheckin?.hour);
+settings.autoCheckin = {
+  enabled: Boolean(settings.autoCheckin?.enabled),
+  hour: Number.isFinite(configuredHour) ? Math.max(0, Math.min(23, Math.round(configuredHour))) : 9,
+};
 
 setSwitcherSettings(settings);
 
@@ -85,8 +90,14 @@ function parseListen(listen) {
   return { host: host || "127.0.0.1", port: Number(port) || 7891 };
 }
 
-function proxySignature(config) {
-  return JSON.stringify({ enabled: Boolean(config?.enabled), listen: config?.listen || "" });
+function proxySignature(editionValue) {
+  const config = settings.proxy[editionValue] || {};
+  return JSON.stringify({
+    enabled: Boolean(config.enabled),
+    listen: config.listen || "",
+    // 网关对象会捕获端点配置，端点覆盖变化时必须重建
+    endpoints: settings.endpointOverrides?.[editionValue] || {},
+  });
 }
 
 function startProxy(editionValue) {
@@ -94,7 +105,7 @@ function startProxy(editionValue) {
   const config = settings.proxy[editionValue];
   if (!config?.enabled) return;
   const { host, port } = parseListen(config.listen);
-  const runtime = { signature: proxySignature(config), error: "" };
+  const runtime = { signature: proxySignature(editionValue), error: "" };
   proxyRuntime.set(editionValue, runtime);
   const app = createGateway(effectiveEdition(editionValue), (v) => settings.proxy[v]);
   const server = http.createServer(app);
@@ -132,7 +143,7 @@ function refreshProxyServers(nextSettings) {
     const runtime = proxyRuntime.get(value);
     if (config.enabled) {
       // 配置未变化且正在监听时不做任何事，避免每次保存设置都重启反代
-      if (server?.listening && runtime?.signature === proxySignature(config)) continue;
+      if (server?.listening && runtime?.signature === proxySignature(value)) continue;
       startProxy(value);
     } else {
       stopProxy(value);

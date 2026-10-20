@@ -171,6 +171,9 @@ async fn run_with_account(
     tools: Option<Value>,
     image_urls: Vec<String>,
     api: &str,
+    reasoning_effort: Option<String>,
+    thinking_type: Option<String>,
+    thinking_budget: Option<i64>,
 ) -> Result<UpstreamResult, (StatusCode, String)> {
     let max_attempts = 3;
     let mut last_error = "没有可用账号".to_string();
@@ -205,8 +208,7 @@ async fn run_with_account(
             .unwrap_or(false)
             && !account.refresh_token.is_empty();
         if needs_refresh {
-            let mut accounts = state.accounts.write().await;
-            accounts.try_refresh(&account.id).await;
+            crate::account::try_refresh_account(&state.accounts, &account.id).await;
         }
         let account = state.accounts.read().await.get(&account.id).cloned().unwrap_or(account);
 
@@ -215,9 +217,9 @@ async fn run_with_account(
             model: model.to_string(),
             messages: req_messages.to_vec(),
             tools: tools.clone(),
-            reasoning_effort: None,
-            thinking_type: None,
-            thinking_budget: None,
+            reasoning_effort: reasoning_effort.clone(),
+            thinking_type: thinking_type.clone(),
+            thinking_budget,
             image_urls: image_urls.clone(),
             workspace_root: String::new(),
             timeout_ms: 300_000,
@@ -257,7 +259,7 @@ async fn run_with_account(
                     accounts.mark_failure(&account.id, status_code, &err);
                 }
                 if status_code == 401 || status_code == 403 {
-                    let refreshed = state.accounts.write().await.try_refresh(&account.id).await;
+                    let refreshed = crate::account::try_refresh_account(&state.accounts, &account.id).await;
                     if refreshed && attempt == 0 {
                         let account2 = state.accounts.read().await.get(&account.id).cloned().unwrap();
                         let req = ChatRequest {
@@ -265,9 +267,9 @@ async fn run_with_account(
                             model: model.to_string(),
                             messages: req_messages.to_vec(),
                             tools: tools.clone(),
-                            reasoning_effort: None,
-                            thinking_type: None,
-                            thinking_budget: None,
+                            reasoning_effort: reasoning_effort.clone(),
+                            thinking_type: thinking_type.clone(),
+                            thinking_budget,
                             image_urls: image_urls.clone(),
                             workspace_root: String::new(),
                             timeout_ms: 300_000,
@@ -391,6 +393,18 @@ fn estimate_tokens(messages: &[Value]) -> i64 {
     (chars / 4) as i64
 }
 
+/// 上游未返回 usage 时使用估算，且保证 total = prompt + completion
+fn token_totals(usage: Option<&TokenUsage>, messages: &[Value], content: &str) -> (i64, i64, i64) {
+    let prompt = usage.map(|u| u.prompt_tokens).unwrap_or_else(|| estimate_tokens(messages));
+    let completion = usage
+        .map(|u| u.completion_tokens)
+        .unwrap_or_else(|| estimate_tokens(&[json!({ "role": "assistant", "content": content })]));
+    let total = usage
+        .map(|u| if u.total_tokens > 0 { u.total_tokens } else { prompt + completion })
+        .unwrap_or(prompt + completion);
+    (prompt, completion, total)
+}
+
 fn record(
     edition_value: &str,
     account_id: &str,
@@ -416,7 +430,9 @@ fn record(
         model: if model.is_empty() { "auto".into() } else { model.to_string() },
         prompt_tokens: prompt,
         completion_tokens: completion,
-        total_tokens: usage.map(|u| u.total_tokens).unwrap_or(prompt + completion),
+        total_tokens: usage
+            .map(|u| if u.total_tokens > 0 { u.total_tokens } else { prompt + completion })
+            .unwrap_or(prompt + completion),
         duration_ms,
         success,
         error: error.to_string(),
@@ -444,6 +460,14 @@ async fn chat_completions(
         body.get("tools").cloned(),
         image_urls,
         "chat",
+        body.get("reasoning_effort").and_then(|v| v.as_str()).map(|v| v.to_string()),
+        body.get("thinking")
+            .and_then(|v| v.get("type"))
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string()),
+        body.get("thinking")
+            .and_then(|v| v.get("budget_tokens"))
+            .and_then(|v| v.as_i64()),
     )
     .await;
     let result = match result {
@@ -482,6 +506,7 @@ async fn chat_completions(
         if !tool_calls.is_empty() {
             message["tool_calls"] = json!(tool_calls);
         }
+        let (prompt_tokens, completion_tokens, total_tokens) = token_totals(usage.as_ref(), &messages, &content);
         return Json(json!({
             "id": completion_id,
             "object": "chat.completion",
@@ -493,9 +518,9 @@ async fn chat_completions(
                 "finish_reason": if tool_calls.is_empty() { "stop" } else { "tool_calls" }
             }],
             "usage": {
-                "prompt_tokens": usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-                "completion_tokens": usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
-                "total_tokens": usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens
             }
         }))
         .into_response();
@@ -606,6 +631,9 @@ async fn responses(
         body.get("tools").cloned(),
         image_urls,
         "responses",
+        None,
+        None,
+        None,
     )
     .await;
     let result = match result {
@@ -634,10 +662,10 @@ async fn responses(
 
     let mut output: Vec<Value> = Vec::new();
     if !reasoning.is_empty() {
-        output.push(json!({ "type": "reasoning", "summary": [{ "type": "summary_text", "text": reasoning }] }));
+        output.push(json!({ "type": "reasoning", "summary": [{ "type": "summary_text", "text": &reasoning }] }));
     }
     if !content.is_empty() {
-        output.push(json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": content, "annotations": [] }] }));
+        output.push(json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": &content, "annotations": [] }] }));
     }
     for tc in &tool_calls {
         output.push(json!({
@@ -648,6 +676,38 @@ async fn responses(
             "arguments": tc.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()).unwrap_or("")
         }));
     }
+    let (input_tokens, output_tokens, total_tokens) = token_totals(usage.as_ref(), &messages, &content);
+
+    if body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let usage_json = json!({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens
+        });
+        let mut sse = String::new();
+        sse.push_str(&format!(
+            "event: response.created\ndata: {}\n\n",
+            json!({ "type": "response.created", "response": { "id": &response_id, "status": "in_progress", "model": &model } })
+        ));
+        if !content.is_empty() {
+            sse.push_str(&format!(
+                "event: response.output_text.delta\ndata: {}\n\n",
+                json!({ "type": "response.output_text.delta", "item_id": &response_id, "output_index": 0, "content_index": 0, "delta": &content })
+            ));
+        }
+        sse.push_str(&format!(
+            "event: response.completed\ndata: {}\n\n",
+            json!({ "type": "response.completed", "response": { "id": &response_id, "status": "completed", "model": &model, "output": output, "usage": usage_json } })
+        ));
+        sse.push_str("data: [DONE]\n\n");
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .header("X-Accel-Buffering", "no")
+            .body(Body::from(sse))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
 
     Json(json!({
         "id": response_id,
@@ -657,9 +717,9 @@ async fn responses(
         "model": model,
         "output": output,
         "usage": {
-            "input_tokens": usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-            "output_tokens": usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
-            "total_tokens": usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens
         }
     }))
     .into_response()
@@ -683,6 +743,9 @@ async fn messages(
         body.get("tools").cloned(),
         image_urls,
         "messages",
+        None,
+        None,
+        None,
     )
     .await;
     let result = match result {
@@ -710,10 +773,10 @@ async fn messages(
 
     let mut content_blocks: Vec<Value> = Vec::new();
     if !reasoning.is_empty() {
-        content_blocks.push(json!({ "type": "thinking", "thinking": reasoning }));
+        content_blocks.push(json!({ "type": "thinking", "thinking": &reasoning }));
     }
     if !content.is_empty() {
-        content_blocks.push(json!({ "type": "text", "text": content }));
+        content_blocks.push(json!({ "type": "text", "text": &content }));
     }
     for tc in &tool_calls {
         content_blocks.push(json!({
@@ -726,6 +789,50 @@ async fn messages(
     if content_blocks.is_empty() {
         content_blocks.push(json!({ "type": "text", "text": "" }));
     }
+    let (input_tokens, output_tokens, _) = token_totals(usage.as_ref(), &messages, &content);
+    let stop_reason = if tool_calls.is_empty() { "end_turn" } else { "tool_use" };
+
+    if body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let mut sse = String::new();
+        sse.push_str(&format!(
+            "event: message_start\ndata: {}\n\n",
+            json!({
+                "type": "message_start",
+                "message": { "id": &msg_id, "type": "message", "role": "assistant", "model": &model, "content": [], "usage": { "input_tokens": input_tokens, "output_tokens": 0 } }
+            })
+        ));
+        for (index, block) in content_blocks.iter().enumerate() {
+            sse.push_str(&format!(
+                "event: content_block_start\ndata: {}\n\n",
+                json!({ "type": "content_block_start", "index": index, "content_block": block })
+            ));
+            let delta = match block.get("type").and_then(|v| v.as_str()) {
+                Some("text") => json!({ "type": "text_delta", "text": block.get("text").cloned().unwrap_or(json!("")) }),
+                Some("thinking") => json!({ "type": "thinking_delta", "thinking": block.get("thinking").cloned().unwrap_or(json!("")) }),
+                _ => json!({ "type": "input_json_delta", "partial_json": block.get("input").map(|v| v.to_string()).unwrap_or_default() }),
+            };
+            sse.push_str(&format!(
+                "event: content_block_delta\ndata: {}\n\n",
+                json!({ "type": "content_block_delta", "index": index, "delta": delta })
+            ));
+            sse.push_str(&format!(
+                "event: content_block_stop\ndata: {}\n\n",
+                json!({ "type": "content_block_stop", "index": index })
+            ));
+        }
+        sse.push_str(&format!(
+            "event: message_delta\ndata: {}\n\n",
+            json!({ "type": "message_delta", "delta": { "stop_reason": stop_reason }, "usage": { "output_tokens": output_tokens } })
+        ));
+        sse.push_str(&format!("event: message_stop\ndata: {}\n\n", json!({ "type": "message_stop" })));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .header("X-Accel-Buffering", "no")
+            .body(Body::from(sse))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
 
     Json(json!({
         "id": msg_id,
@@ -733,10 +840,10 @@ async fn messages(
         "role": "assistant",
         "model": model,
         "content": content_blocks,
-        "stop_reason": if tool_calls.is_empty() { "end_turn" } else { "tool_use" },
+        "stop_reason": stop_reason,
         "usage": {
-            "input_tokens": usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-            "output_tokens": usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0)
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens
         }
     }))
     .into_response()

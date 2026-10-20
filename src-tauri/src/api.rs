@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::account::AccountInput;
+use crate::account::{try_refresh_account, AccountInput};
 use crate::editions;
 use crate::info;
 use crate::oauth;
@@ -64,15 +64,28 @@ fn err(status: StatusCode, message: &str) -> Response {
 /* ---------------- 状态 ---------------- */
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Response {
-    let accounts = state.accounts.read().await;
-    let counts = accounts.counts();
-    let settings = state.settings.read().await;
+    let (counts, current_accounts) = {
+        let accounts = state.accounts.read().await;
+        let mut current = HashMap::new();
+        for value in editions::EDITION_LIST {
+            current.insert(
+                value.to_string(),
+                accounts.client_current.get(value).and_then(|c| c.clone()),
+            );
+        }
+        (accounts.counts(), current)
+    };
+    let settings = state.settings.read().await.clone();
 
     let mut edition_status = serde_json::Map::new();
     for value in editions::EDITION_LIST {
         let edition = editions::edition_of(value);
-        let client = switcher::detect_client(&edition, &settings.client_dir_overrides.get(value).cloned().unwrap_or_default());
-        let current = accounts.client_current.get(value).and_then(|c| c.clone());
+        let client = switcher::detect_client(
+            &edition,
+            &settings.client_dir_overrides.get(value).cloned().unwrap_or_default(),
+            &settings.client_exe_paths.get(value).cloned().unwrap_or_default(),
+        );
+        let current = current_accounts.get(value).and_then(|c| c.clone());
         let config = settings
             .proxy
             .get(value)
@@ -235,11 +248,13 @@ async fn delete_account(State(state): State<Arc<AppState>>, Path(id): Path<Strin
 }
 
 async fn refresh_account(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let mut accounts = state.accounts.write().await;
-    let ok = accounts.try_refresh(&id).await;
+    let ok = try_refresh_account(&state.accounts, &id).await;
+    let accounts = state.accounts.read().await;
     if ok {
-        let account = accounts.get(&id).cloned().unwrap();
-        ok_json(json!({ "ok": true, "account": accounts.view(&account) }))
+        match accounts.get(&id) {
+            Some(account) => ok_json(json!({ "ok": true, "account": accounts.view(account) })),
+            None => err(StatusCode::NOT_FOUND, "账号不存在"),
+        }
     } else {
         let last_error = accounts.get(&id).map(|a| a.last_error.clone()).unwrap_or_default();
         err(StatusCode::BAD_REQUEST, &format!("{}（可能需要重新登录）", last_error))
@@ -319,8 +334,8 @@ async fn import_client_account(State(state): State<Arc<AppState>>, Json(body): J
         user_type: "personal_standard".into(),
         security_oauth_token: auth.token.clone(),
         refresh_token: auth.refresh_token.clone(),
-        token_expire_at: auth.expires_at.clone().map(Value::String),
-        refresh_token_expires_at: auth.refresh_token_expires_at.clone().map(Value::String),
+        token_expire_at: auth.expires_at.clone(),
+        refresh_token_expires_at: auth.refresh_token_expires_at.clone(),
         pat: String::new(),
         machine_id: auth.machine_id.clone(),
         machine_token: String::new(),
@@ -587,7 +602,11 @@ async fn detect_client(State(state): State<Arc<AppState>>, Query(q): Query<HashM
         let settings = state.settings.read().await;
         settings.client_dir_overrides.get(&edition_value).cloned().unwrap_or_default()
     };
-    let client = switcher::detect_client(&edition, &override_dir);
+    let exe_override = {
+        let settings = state.settings.read().await;
+        settings.client_exe_paths.get(&edition_value).cloned().unwrap_or_default()
+    };
+    let client = switcher::detect_client(&edition, &override_dir, &exe_override);
     ok_json(json!({ "client": client }))
 }
 
@@ -739,7 +758,7 @@ async fn save_settings(State(state): State<Arc<AppState>>, Json(body): Json<Valu
     }
     if let Some(v) = incoming.get("autoCheckin").and_then(|v| v.as_object()) {
         settings.auto_checkin.enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
-        settings.auto_checkin.hour = v.get("hour").and_then(|x| x.as_i64()).unwrap_or(9);
+        settings.auto_checkin.hour = v.get("hour").and_then(|x| x.as_i64()).unwrap_or(9).clamp(0, 23);
     }
     if let Some(v) = incoming.get("endpointOverrides").and_then(|v| v.as_object()) {
         settings.endpoint_overrides.clear();

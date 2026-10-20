@@ -88,7 +88,14 @@ export function SwitchAccountDialog({
   const progress = steps.length > 0 ? Math.round((completed / steps.length) * 100) : 0;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        // 切换任务执行中不允许关闭，避免误以为已取消而实际客户端仍在被修改
+        if (!next && !done && !error) return;
+        onOpenChange(next);
+      }}
+    >
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">

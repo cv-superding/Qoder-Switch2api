@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, FolderGit2, Loader2, MessagesSquare, RefreshCw, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
@@ -23,20 +23,24 @@ export default function SessionsPage() {
   const [chats, setChats] = useState<ChatItem[]>([]);
   const [chatsLoading, setChatsLoading] = useState(false);
   const [exportingId, setExportingId] = useState("");
+  const loadSeq = useRef(0);
 
   async function loadWorkspaces() {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError("");
     setSelected("");
     setChats([]);
     try {
       const res = await api.api.listWorkspaces(edition);
+      if (seq !== loadSeq.current) return;
       setWorkspaces(res.workspaces ?? []);
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setError(api.asError(e));
       setWorkspaces([]);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }
 

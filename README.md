@@ -156,6 +156,15 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 更新日志
 
+### v1.1.2
+
+- 修复手动 Token 账号因 Cosy 头缺少 machineId 触发 `randomUUID is not defined`，导致请求全部失败
+- 修复反代未使用设置页的 API 端点覆盖、上游 401 被统一吞成 503、SSE 错误帧被当成成功空响应
+- **结束 Qoder 进程改为按可执行文件绝对路径精确匹配**，不再按进程名全局结束，避免误关其它 Qoder 窗口
+- 无客户端登录 Token 的账号（PAT / 备份占位）拒绝切换，避免写入空登录态；切换不再沿用上一个账号的身份与 refresh token
+- Rust 侧补齐上游请求超时、`/v1/responses` 与 `/v1/messages` 流式输出、用量排序与 Token 统计、会话导出路径校验
+- 修复会话目录导出路径穿越、设置小时越界、JSON 文件跨进程写入冲突、Token 续期未更新 refresh 到期时间等问题
+
 ### v1.1.1
 
 - 修复 GitHub Actions 中 `npm ci` 因可选依赖锁文件不一致导致发布失败的问题

@@ -14,6 +14,7 @@ pub mod cosy;
 pub mod crypto;
 pub mod editions;
 pub mod gateway;
+pub mod http;
 pub mod info;
 pub mod oauth;
 pub mod paths;

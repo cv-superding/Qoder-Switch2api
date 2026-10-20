@@ -83,7 +83,7 @@ export default function CreditStatsPage() {
   const totalRemaining = editionAccounts.reduce((sum, a) => sum + (creditMap[a.id]?.quota?.remaining ?? a.quota?.remaining ?? 0), 0);
   const expiringSoon = editionAccounts.filter((a) => {
     const d = daysLeft(creditMap[a.id]?.expiresAt ?? a.quota?.expiresAt);
-    return d != null && d <= 7;
+    return d != null && d >= 0 && d <= 7;
   }).length;
   const abnormal = editionAccounts.filter(
     (a) => a.status === "needs_relogin" || Boolean(creditErrorMap[a.id]),

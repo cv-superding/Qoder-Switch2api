@@ -219,6 +219,9 @@ export async function refreshToken(edition, account) {
     securityOauthToken: token,
     refreshToken: data.refresh_token || data.refreshToken || account.refreshToken,
     tokenExpireAt: normalizeExpire(data.expires_at || data.expireTime),
+    refreshTokenExpiresAt: normalizeExpire(
+      data.refresh_token_expires_at ?? data.refreshTokenExpiresAt ?? data.refreshTokenExpireAt,
+    ),
   };
 }
 

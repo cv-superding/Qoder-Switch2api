@@ -50,7 +50,9 @@ function latestPrompt(messages) {
 }
 
 function normalizeContent(content) {
+  if (content == null) return "";
   if (typeof content === "string") return content;
+  if (typeof content === "number" || typeof content === "boolean") return String(content);
   if (Array.isArray(content)) {
     const parts = [];
     for (const item of content) {
@@ -62,7 +64,8 @@ function normalizeContent(content) {
     }
     return parts.join("\n");
   }
-  return JSON.stringify(content);
+  const text = JSON.stringify(content);
+  return typeof text === "string" ? text : "";
 }
 
 function reasoningEnabled(req) {
@@ -312,14 +315,31 @@ function parseLegacyLine(dataLine) {
   } catch {
     return null;
   }
-  const inner = envelope?.body;
-  if (!inner || typeof inner !== "string") return null;
-  let chunk;
-  try {
-    chunk = JSON.parse(inner);
-  } catch {
-    return null;
+
+  let chunk = null;
+  if (typeof envelope?.body === "string") {
+    try {
+      chunk = JSON.parse(envelope.body);
+    } catch {
+      chunk = null;
+    }
+  } else if (envelope?.body && typeof envelope.body === "object") {
+    chunk = envelope.body;
   }
+
+  const statusCode = Number(envelope?.statusCodeValue ?? envelope?.statusCode ?? envelope?.status ?? 0);
+  const chunkError =
+    chunk?.error?.message ||
+    (typeof chunk?.error === "string" ? chunk.error : "") ||
+    envelope?.error?.message ||
+    (typeof envelope?.error === "string" ? envelope.error : "");
+  const failed = (Number.isFinite(statusCode) && statusCode >= 400) || Boolean(chunkError);
+  if (failed) {
+    const detail = chunkError || chunk?.message || envelope?.message || envelope?.headers?.["error"] || "";
+    const suffix = detail ? `: ${String(detail).slice(0, 300)}` : "";
+    return [{ type: "error", error: `上游 HTTP ${statusCode >= 400 ? statusCode : "?"}${suffix}` }];
+  }
+  if (!chunk) return null;
   const events = [];
   for (const choice of chunk.choices || []) {
     const delta = choice.delta || {};
@@ -358,7 +378,7 @@ async function* legacyStream(req) {
     requestBody: encoded,
   });
   headers["content-type"] = "application/json";
-  headers["user-agent"] = "Qoder-Switch2api/1.0";
+  headers["user-agent"] = "Qoder-Switch2api/1.1";
   headers["x-model-key"] = normalizeModelKey(req.model);
   headers["x-model-source"] = "system";
 

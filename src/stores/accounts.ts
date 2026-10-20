@@ -60,7 +60,9 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
   },
 
   async ensureCredits(ids) {
-    const pending = ids.filter((id) => !get().creditMap[id] && !get().creditLoadingMap[id]);
+    const pending = ids.filter(
+      (id) => !get().creditMap[id] && !get().creditLoadingMap[id] && !get().creditErrorMap[id],
+    );
     if (pending.length === 0) return;
     set((s) => {
       const next = { ...s.creditLoadingMap };

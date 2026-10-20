@@ -48,8 +48,8 @@ pub struct ClientAuth {
     pub source: String,
     pub token: String,
     pub refresh_token: String,
-    pub expires_at: Option<String>,
-    pub refresh_token_expires_at: Option<String>,
+    pub expires_at: Option<Value>,
+    pub refresh_token_expires_at: Option<Value>,
     pub user_id: String,
     pub user_name: String,
     pub user_email: String,
@@ -64,7 +64,7 @@ fn read_machine_id_file(dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-pub fn detect_client(edition: &Edition, override_dir: &str) -> ClientInfo {
+pub fn detect_client(edition: &Edition, override_dir: &str, exe_override: &str) -> ClientInfo {
     let dir = resolve_client_dir(edition, override_dir);
     let auth_dat = auth_dat_path(&dir);
     let vscdb = global_storage_db(&dir);
@@ -83,7 +83,11 @@ pub fn detect_client(edition: &Edition, override_dir: &str) -> ClientInfo {
         auth_kind,
         has_oscrypt_key: load_oscrypt_key(&dir).is_some(),
         machine_id: read_machine_id_file(&dir),
-        client_exe_path: find_client_exe(edition).unwrap_or_default(),
+        client_exe_path: if exe_override.trim().is_empty() {
+            find_client_exe(edition).unwrap_or_default()
+        } else {
+            exe_override.to_string()
+        },
         sqlite: true,
     }
 }
@@ -145,8 +149,11 @@ fn normalize_auth(json: Value, source: &str, machine_id: String) -> Option<Clien
             .unwrap_or("")
             .to_string(),
         refresh_token: json.get("refreshToken").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        expires_at: json.get("expiresAt").map(|v| v.to_string()),
-        refresh_token_expires_at: json.get("refreshTokenExpiresAt").map(|v| v.to_string()),
+        expires_at: json.get("expiresAt").cloned(),
+        refresh_token_expires_at: json
+            .get("refreshTokenExpiresAt")
+            .or_else(|| json.get("refreshTokenExpireAt"))
+            .cloned(),
         user_id: user
             .get("id")
             .or_else(|| json.get("uid"))
@@ -183,40 +190,30 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
         if let Some(obj) = base.as_object_mut() {
             obj.insert("schemaVersion".into(), obj.get("schemaVersion").cloned().unwrap_or(json!(1)));
             obj.insert("token".into(), json!(account.security_oauth_token));
+            // 切换账号必须写入目标账号自己的凭证与身份，不能沿用上一个账号的值
+            obj.insert("refreshToken".into(), json!(account.refresh_token));
             obj.insert(
-                "refreshToken".into(),
-                json!(if account.refresh_token.is_empty() {
-                    obj.get("refreshToken").cloned().unwrap_or(json!(""))
-                } else {
-                    json!(account.refresh_token)
-                }),
+                "expiresAt".into(),
+                match account.token_expire_at {
+                    Some(expire) if use_iso => json!(iso_from_ms(expire)),
+                    Some(expire) => json!(expire),
+                    None => Value::Null,
+                },
             );
-            if let Some(expire) = account.token_expire_at {
-                obj.insert(
-                    "expiresAt".into(),
-                    if use_iso {
-                        json!(iso_from_ms(expire))
-                    } else {
-                        json!(expire)
-                    },
-                );
-            }
-            if let Some(expire) = account.refresh_token_expires_at {
-                obj.insert(
-                    "refreshTokenExpiresAt".into(),
-                    if use_iso {
-                        json!(iso_from_ms(expire))
-                    } else {
-                        json!(expire)
-                    },
-                );
-            }
+            obj.insert(
+                "refreshTokenExpiresAt".into(),
+                match account.refresh_token_expires_at {
+                    Some(expire) if use_iso => json!(iso_from_ms(expire)),
+                    Some(expire) => json!(expire),
+                    None => Value::Null,
+                },
+            );
             let mut user = obj.get("user").cloned().unwrap_or(json!({}));
             if let Some(u) = user.as_object_mut() {
-                u.insert("id".into(), json!(if account.uid.is_empty() { u.get("id").cloned().unwrap_or(json!("")) } else { json!(account.uid) }));
-                u.insert("name".into(), json!(if account.name.is_empty() { u.get("name").cloned().unwrap_or(json!("")) } else { json!(account.name) }));
-                u.insert("email".into(), json!(if account.email.is_empty() { u.get("email").cloned().unwrap_or(json!("")) } else { json!(account.email) }));
-                u.insert("phone".into(), json!(if account.phone.is_empty() { u.get("phone").cloned().unwrap_or(json!("")) } else { json!(account.phone) }));
+                u.insert("id".into(), json!(account.uid));
+                u.insert("name".into(), json!(account.name));
+                u.insert("email".into(), json!(account.email));
+                u.insert("phone".into(), json!(account.phone));
             }
             obj.insert("user".into(), user);
         }
@@ -236,44 +233,24 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
                 |r| r.get::<_, rusqlite::types::Value>(0),
             )
             .ok();
-        let value_bytes: Vec<u8> = match existing {
-            Some(rusqlite::types::Value::Blob(b)) => {
-                if b.len() > 3 && &b[..3] == b"v10" {
-                    let key = load_oscrypt_key(&dir)
-                        .ok_or_else(|| "无法解出 OSCrypt 密钥，写入取消".to_string())?;
-                    let plain = oscrypt_decrypt(&key, &b)?;
-                    let mut json: Value = serde_json::from_slice(&plain).unwrap_or(json!({}));
-                    if let Some(obj) = json.as_object_mut() {
-                        obj.insert("token".into(), json!(account.security_oauth_token));
-                        if !account.refresh_token.is_empty() {
-                            obj.insert("refreshToken".into(), json!(account.refresh_token));
-                        }
-                        if let Some(expire) = account.token_expire_at {
-                            obj.insert("expiresAt".into(), json!(expire));
-                        }
-                        obj.insert("uid".into(), json!(account.uid));
-                        obj.insert(
-                            "user".into(),
-                            json!({
-                                "id": account.uid,
-                                "name": account.name,
-                                "email": account.email
-                            }),
-                        );
-                    }
-                    oscrypt_encrypt(&key, &json.to_string())
-                } else {
-                    b
-                }
+        let mut encryption_key = None;
+        let base: Value = match existing {
+            Some(rusqlite::types::Value::Blob(b)) if b.len() > 3 && &b[..3] == b"v10" => {
+                let key = load_oscrypt_key(&dir)
+                    .ok_or_else(|| "无法解出 OSCrypt 密钥，写入取消".to_string())?;
+                let plain = oscrypt_decrypt(&key, &b)?;
+                let json = serde_json::from_slice(&plain).unwrap_or(json!({}));
+                encryption_key = Some(key);
+                json
             }
-            Some(rusqlite::types::Value::Text(t)) => t.into_bytes(),
-            _ => serde_json::to_vec(&json!({
-                "token": account.security_oauth_token,
-                "refreshToken": account.refresh_token,
-                "uid": account.uid,
-                "user": { "id": account.uid, "name": account.name, "email": account.email }
-            }))
-            .unwrap_or_default(),
+            Some(rusqlite::types::Value::Blob(b)) => serde_json::from_slice(&b).unwrap_or(json!({})),
+            Some(rusqlite::types::Value::Text(t)) => serde_json::from_str(&t).unwrap_or(json!({})),
+            _ => json!({}),
+        };
+        let merged = merge_client_auth_json(base, account);
+        let value_bytes: Vec<u8> = match encryption_key {
+            Some(key) => oscrypt_encrypt(&key, &merged.to_string()),
+            None => serde_json::to_vec(&merged).unwrap_or_default(),
         };
         conn.execute(
             "INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)",
@@ -284,6 +261,33 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
     }
 
     Err("未找到客户端登录态文件（auth.v1.dat / state.vscdb），请先在本机打开 Qoder 并登录一次".into())
+}
+
+fn merge_client_auth_json(base: Value, account: &Account) -> Value {
+    let mut obj = if base.is_object() { base } else { json!({}) };
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("token".into(), json!(account.security_oauth_token));
+        map.insert("refreshToken".into(), json!(account.refresh_token));
+        map.insert("expiresAt".into(), account.token_expire_at.map(|v| json!(v)).unwrap_or(Value::Null));
+        map.insert(
+            "refreshTokenExpiresAt".into(),
+            account.refresh_token_expires_at.map(|v| json!(v)).unwrap_or(Value::Null),
+        );
+        map.insert("uid".into(), json!(account.uid));
+        let mut user = map
+            .get("user")
+            .cloned()
+            .filter(|v| v.is_object())
+            .unwrap_or_else(|| json!({}));
+        if let Some(u) = user.as_object_mut() {
+            u.insert("id".into(), json!(account.uid));
+            u.insert("name".into(), json!(account.name));
+            u.insert("email".into(), json!(account.email));
+            u.insert("phone".into(), json!(account.phone));
+        }
+        map.insert("user".into(), user);
+    }
+    obj
 }
 
 fn iso_from_ms(ms: i64) -> String {
@@ -316,35 +320,77 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// 结束客户端进程，返回结束的进程数
-pub fn kill_client_processes(edition: &Edition) -> usize {
-    let mut count = 0;
-    if cfg!(target_os = "windows") {
-        let mut names = edition.client_process_names.clone();
-        names.push("Qoder".into());
-        for name in names {
-            let filter = format!("IMAGENAME eq {}.exe", name);
-            if let Ok(output) = Command::new("tasklist")
-                .args(["/FI", &filter, "/NH"])
-                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                .output()
-            {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.contains(&name) {
-                    let _ = Command::new("taskkill")
-                        .args(["/F", "/IM", &format!("{}.exe", name)])
-                        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                        .output();
-                    count += 1;
-                }
+/// 解析目标客户端可执行文件。
+/// 设置数据目录覆盖时只在覆盖目录内查找，避免误判机器上的其它 Qoder 安装。
+fn resolve_client_exe(edition: &Edition, override_dir: &str, exe_override: &str) -> Option<String> {
+    if !exe_override.trim().is_empty() {
+        return Some(exe_override.to_string());
+    }
+    if !override_dir.trim().is_empty() {
+        let dir = PathBuf::from(override_dir);
+        let candidates = [
+            dir.join("Qoder.exe"),
+            dir.parent().map(|p| p.join("Qoder.exe")).unwrap_or_default(),
+        ];
+        for candidate in candidates {
+            if !candidate.as_os_str().is_empty() && candidate.exists() {
+                return Some(candidate.to_string_lossy().to_string());
             }
         }
-    } else {
-        let mut names = edition.client_process_names.clone();
-        names.push("Qoder".into());
-        for name in names {
-            let _ = Command::new("pkill").args(["-f", &name]).output();
-            count += 1;
+        return None;
+    }
+    find_client_exe(edition)
+}
+
+/// 结束指定客户端进程：只按可执行文件绝对路径精确匹配，绝不按进程名全局结束。
+pub fn kill_client_processes(exe_path: &str) -> usize {
+    let target = exe_path.trim();
+    if target.is_empty() {
+        return 0;
+    }
+    if cfg!(target_os = "windows") {
+        #[cfg(windows)]
+        {
+            let script = r#"
+$targets = @()
+foreach ($p in ($env:QODER_TARGET_EXE -split ';;')) {
+  if ($p) { try { $targets += [IO.Path]::GetFullPath($p).ToLower() } catch {} }
+}
+$pids = @()
+foreach ($proc in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
+  if (-not $proc.ExecutablePath) { continue }
+  try { $full = [IO.Path]::GetFullPath($proc.ExecutablePath).ToLower() } catch { continue }
+  if ($targets -contains $full) { $pids += $proc.ProcessId }
+}
+$pids -join ","
+"#;
+            let output = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env("QODER_TARGET_EXE", target)
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .output();
+            let Ok(output) = output else { return 0 };
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut count = 0;
+            for pid in stdout.trim().split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/PID", pid])
+                    .creation_flags(0x0800_0000)
+                    .output();
+                count += 1;
+            }
+            return count;
         }
+        #[cfg(not(windows))]
+        return 0;
+    }
+    let output = Command::new("pgrep").args(["-f", target]).output();
+    let Ok(output) = output else { return 0 };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut count = 0;
+    for pid in stdout.lines().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let _ = Command::new("kill").args(["-9", pid]).output();
+        count += 1;
     }
     count
 }
@@ -399,9 +445,16 @@ pub async fn switch_client_account<F>(
 where
     F: FnMut(SwitchStep),
 {
+    if account.security_oauth_token.is_empty() {
+        return Err("该账号没有 Qoder 客户端登录 Token（PAT / 备份占位账号不支持切换），请先重新登录".into());
+    }
     let dir = resolve_client_dir(edition, override_dir);
     let auth_dat = auth_dat_path(&dir);
     let vscdb = global_storage_db(&dir);
+    if !auth_dat.exists() && !vscdb.exists() {
+        return Err("未找到客户端登录态文件，请先打开 Qoder 并登录一次，再执行切换".into());
+    }
+    let exe = resolve_client_exe(edition, override_dir, exe_override);
 
     on_step(SwitchStep {
         name: "备份当前登录态".into(),
@@ -423,14 +476,16 @@ where
         status: "running".into(),
         detail: String::new(),
     });
-    let killed = kill_client_processes(edition);
+    let killed = kill_client_processes(exe.as_deref().unwrap_or(""));
     on_step(SwitchStep {
         name: "结束 Qoder 进程".into(),
         status: "done".into(),
         detail: if killed > 0 {
             format!("已结束 {} 个进程", killed)
+        } else if exe.is_some() {
+            "未发现运行中的客户端进程".into()
         } else {
-            "未发现运行中的客户端".into()
+            "未定位客户端可执行文件，已跳过结束进程（请手动关闭 Qoder 后重试）".into()
         },
     });
 
@@ -459,11 +514,6 @@ where
             status: "running".into(),
             detail: String::new(),
         });
-        let exe = if exe_override.trim().is_empty() {
-            find_client_exe(edition)
-        } else {
-            Some(exe_override.to_string())
-        };
         match exe {
             Some(path) => match launch_client(&path) {
                 Ok(()) => on_step(SwitchStep {

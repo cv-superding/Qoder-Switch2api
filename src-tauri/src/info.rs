@@ -44,8 +44,20 @@ fn auth_header(account: &Account) -> String {
     format!("Bearer {}", if account.pat.is_empty() { &account.security_oauth_token } else { &account.pat })
 }
 
+fn json_ms(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(n) = value.as_i64() {
+        return Some(if n < 1_000_000_000_000 { n * 1000 } else { n });
+    }
+    value.as_str().and_then(|raw| {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|date| date.timestamp_millis())
+    })
+}
+
 async fn get_json(edition: &Edition, account: &Account, path: &str) -> Result<Value, String> {
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .get(open_api(edition, path))
         .header("Authorization", auth_header(account))
         .header("Accept", "application/json")
@@ -73,7 +85,7 @@ pub async fn get_quota_usage(edition: &Edition, account: &Account) -> Result<Quo
         usage_type: data.get("usageType").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         total_usage_percentage: data.get("totalUsagePercentage").and_then(|v| v.as_f64()),
         is_quota_exceeded: data.get("isQuotaExceeded").and_then(|v| v.as_bool()).unwrap_or(false),
-        expires_at: data.get("expiresAt").and_then(|v| v.as_i64()),
+        expires_at: json_ms(data.get("expiresAt")),
         quota,
     })
 }
@@ -98,8 +110,8 @@ pub async fn get_user_plan(edition: &Edition, account: &Account) -> Result<PlanI
             .or_else(|| data.get("isPersonalVersion"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        start_date: data.get("start_date").and_then(|v| v.as_i64()),
-        end_date: data.get("end_date").and_then(|v| v.as_i64()),
+        start_date: json_ms(data.get("start_date").or_else(|| data.get("startDate"))),
+        end_date: json_ms(data.get("end_date").or_else(|| data.get("endDate"))),
     })
 }
 
@@ -167,7 +179,7 @@ pub async fn claim_campaign(edition: &Edition, account: &Account, campaign_id: &
         open_api(edition, &edition.oauth.claim_path).trim_end_matches('/'),
         campaign_id
     );
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .post(&url)
         .header("Authorization", auth_header(account))
         .send()
@@ -192,7 +204,7 @@ pub async fn claim_campaign(edition: &Edition, account: &Account, campaign_id: &
 
 /// 拉取上游可用模型列表（兼容明文 JSON / {body} 信封 / legacy 编码）
 pub async fn fetch_model_list(edition: &Edition, account: &Account) -> Result<Vec<Value>, String> {
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .get(&edition.legacy.model_list_url)
         .header("Authorization", auth_header(account))
         .header("x-model-source", "system")

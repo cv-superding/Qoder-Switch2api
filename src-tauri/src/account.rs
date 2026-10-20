@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::crypto::{now_ms, random_id};
-use crate::editions::{edition_of, Edition};
+use crate::editions::edition_of;
 use crate::store::{load_encrypted_value, save_encrypted};
 
 pub const COOLDOWN_MS: i64 = 120 * 1000;
@@ -317,6 +317,52 @@ pub struct ClientCurrent {
     pub at: i64,
 }
 
+/// 尝试用 refresh_token 续期。网络请求期间不持有账号写锁，避免阻塞 WebUI。
+pub async fn try_refresh_account(
+    accounts: &tokio::sync::RwLock<AccountManager>,
+    id: &str,
+) -> bool {
+    let account = match accounts.read().await.get(id).cloned() {
+        Some(a) => a,
+        None => return false,
+    };
+    if account.refresh_token.is_empty() {
+        return false;
+    }
+    let edition = edition_of(&account.edition);
+    match crate::oauth::refresh_token(&edition, &account).await {
+        Ok(result) => {
+            let mut patch = serde_json::json!({
+                "securityOauthToken": result.security_oauth_token,
+                "refreshToken": result.refresh_token,
+                "status": "active",
+                "lastError": "",
+            });
+            if let Some(value) = result.expires_at.as_ref().filter(|v| !v.is_null()) {
+                patch["tokenExpireAt"] = value.clone();
+            }
+            if let Some(value) = result.refresh_token_expires_at.as_ref().filter(|v| !v.is_null()) {
+                patch["refreshTokenExpiresAt"] = value.clone();
+            }
+            let mut manager = accounts.write().await;
+            let _ = manager.update(id, &patch);
+            manager.cooldowns.remove(id);
+            true
+        }
+        Err(e) => {
+            let mut manager = accounts.write().await;
+            let _ = manager.update(
+                id,
+                &serde_json::json!({
+                    "status": "needs_relogin",
+                    "lastError": format!("续期失败: {}", e),
+                }),
+            );
+            false
+        }
+    }
+}
+
 fn camelize_account_keys(value: &mut serde_json::Value) {
     let Some(obj) = value.as_object_mut() else { return };
     let keys: Vec<String> = obj.keys().cloned().collect();
@@ -624,7 +670,7 @@ impl AccountManager {
 
     /// 轮转选号：额度剩余多的优先，同级 round-robin
     pub fn pick(&mut self, edition_value: &str, group: &str) -> Option<Account> {
-        let mut candidates: Vec<Account> = self
+        let candidates: Vec<Account> = self
             .proxy_candidates(edition_value, group)
             .into_iter()
             .cloned()
@@ -665,11 +711,17 @@ impl AccountManager {
     }
 
     pub fn mark_success(&mut self, id: &str) {
+        let mut changed = false;
         if let Some(a) = self.accounts.iter_mut().find(|a| a.id == id) {
+            changed = !a.last_error.is_empty() || a.status == "needs_relogin";
             a.last_error = String::new();
+            a.status = "active".into();
             a.updated_at = now_ms();
         }
         self.cooldowns.remove(id);
+        if changed {
+            self.save();
+        }
     }
 
     pub fn mark_failure(&mut self, id: &str, status_code: u16, message: &str) {
@@ -688,44 +740,6 @@ impl AccountManager {
             }
         }
         self.save();
-    }
-
-    /// 尝试用 refresh_token 续期
-    pub async fn try_refresh(&mut self, id: &str) -> bool {
-        let account = match self.get(id) {
-            Some(a) => a.clone(),
-            None => return false,
-        };
-        if account.refresh_token.is_empty() {
-            return false;
-        }
-        let edition = edition_of(&account.edition);
-        match crate::oauth::refresh_token(&edition, &account).await {
-            Ok(result) => {
-                let _ = self.update(
-                    id,
-                    &serde_json::json!({
-                        "securityOauthToken": result.security_oauth_token,
-                        "refreshToken": result.refresh_token,
-                        "tokenExpireAt": result.expires_at,
-                        "status": "active",
-                        "lastError": "",
-                    }),
-                );
-                self.cooldowns.remove(id);
-                true
-            }
-            Err(e) => {
-                let _ = self.update(
-                    id,
-                    &serde_json::json!({
-                        "status": "needs_relogin",
-                        "lastError": format!("续期失败: {}", e),
-                    }),
-                );
-                false
-            }
-        }
     }
 
     pub fn counts(&self) -> serde_json::Value {
@@ -786,7 +800,9 @@ struct NormalizedAccount {
 }
 
 fn apply_normalized(account: &mut Account, n: &NormalizedAccount, now: i64) {
-    account.label = n.label.clone();
+    if !n.label.is_empty() {
+        account.label = n.label.clone();
+    }
     account.name = n.name.clone();
     account.email = n.email.clone();
     account.phone = n.phone.clone();

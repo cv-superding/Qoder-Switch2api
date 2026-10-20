@@ -118,6 +118,9 @@ export function AccountCard({
   const tokenExpired = typeof account.tokenExpireAt === "number" && account.tokenExpireAt < Date.now();
   const urgentChip =
     account.status === "needs_relogin" || tokenExpired ? "warning" : account.cooling ? "secondary" : null;
+  const canSwitch = Boolean(account.hasToken);
+  const canRefresh = Boolean(account.hasRefreshToken);
+  const canCheckin = Boolean(account.hasToken || account.hasPat);
 
   const statusChips = (
     <>
@@ -174,10 +177,10 @@ export function AccountCard({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-44">
         <DropdownMenuLabel className="truncate">{displayName}</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => onRefresh(account)}>
+        <DropdownMenuItem onSelect={() => onRefresh(account)} disabled={!canRefresh}>
           <RefreshCw />刷新 Token
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onCheckin(account)}>
+        <DropdownMenuItem onSelect={() => onCheckin(account)} disabled={!canCheckin}>
           <CircleCheck />手动签到
         </DropdownMenuItem>
         <DropdownMenuSeparator />
@@ -272,9 +275,10 @@ export function AccountCard({
                       variant="ghost"
                       size="icon"
                       className="size-7 rounded-lg"
-                      disabled={clientBusy}
+                      disabled={clientBusy || !canSwitch}
                       onClick={() => onSwitch(account)}
                       aria-label="切换到客户端"
+                      title={canSwitch ? "切换到 Qoder 客户端" : "该账号没有客户端登录 Token，无法切换"}
                     >
                       <ArrowLeftRight className="size-3.5" />
                     </Button>
@@ -423,10 +427,11 @@ export function AccountCard({
               variant="outline"
               size="sm"
               className="h-8 border-primary/25 px-2.5 text-[11.5px] text-primary hover:bg-primary/[0.06] hover:text-primary"
-              disabled={clientBusy || clientLoading}
+              disabled={clientBusy || clientLoading || !canSwitch}
               onClick={() => onSwitch(account)}
               aria-label="切换到客户端"
               aria-busy={clientLoading}
+              title={canSwitch ? "切换到 Qoder 客户端" : "该账号没有客户端登录 Token，无法切换"}
             >
               {clientLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Mark size={16} />}
               <span>{clientLoading ? "切换中" : "切换到客户端"}</span>
@@ -435,7 +440,15 @@ export function AccountCard({
           <div className="ml-auto flex items-center gap-0.5">
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="size-8 rounded-lg" onClick={() => onRefresh(account)} aria-label="刷新 Token">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 rounded-lg"
+                  onClick={() => onRefresh(account)}
+                  disabled={!canRefresh}
+                  aria-label="刷新 Token"
+                  title={canRefresh ? "刷新登录令牌" : "没有 refresh token，需重新登录"}
+                >
                   <RefreshCw className="size-3.5" />
                 </Button>
               </TooltipTrigger>
@@ -443,7 +456,15 @@ export function AccountCard({
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="size-8 rounded-lg" onClick={() => onCheckin(account)} aria-label="手动签到">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 rounded-lg"
+                  onClick={() => onCheckin(account)}
+                  disabled={!canCheckin}
+                  aria-label="手动签到"
+                  title={canCheckin ? "领取签到积分" : "账号没有登录凭证，无法签到"}
+                >
                   <Coins className="size-3.5" />
                 </Button>
               </TooltipTrigger>

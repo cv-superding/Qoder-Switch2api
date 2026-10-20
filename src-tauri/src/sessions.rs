@@ -63,6 +63,14 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+fn sql_value_text(value: rusqlite::types::Value) -> Option<String> {
+    match value {
+        rusqlite::types::Value::Text(text) => Some(text),
+        rusqlite::types::Value::Blob(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
+        _ => None,
+    }
+}
+
 fn last_segment(p: &str) -> String {
     if p.is_empty() {
         return String::new();
@@ -118,13 +126,15 @@ pub fn list_workspaces(edition: &Edition, override_dir: &str) -> Vec<Workspace> 
         if let Ok(conn) = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
             for ws in &mut out {
                 let key = format!("lingma.chat.localHistory.{}", ws.id);
-                if let Ok(text) = conn.query_row(
+                if let Ok(value) = conn.query_row(
                     "SELECT value FROM ItemTable WHERE key = ?",
                     [&key],
-                    |r| r.get::<_, String>(0),
+                    |r| r.get::<_, rusqlite::types::Value>(0),
                 ) {
-                    if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&text) {
-                        ws.chat_count = arr.len();
+                    if let Some(text) = sql_value_text(value) {
+                        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&text) {
+                            ws.chat_count = arr.len();
+                        }
                     }
                 }
             }
@@ -143,14 +153,15 @@ pub fn get_chat_history(edition: &Edition, workspace_id: &str, override_dir: &st
     let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("打开数据库失败: {}", e))?;
     let key = format!("lingma.chat.localHistory.{}", workspace_id);
-    let text: String = match conn.query_row(
+    let value = match conn.query_row(
         "SELECT value FROM ItemTable WHERE key = ?",
         [&key],
-        |r| r.get(0),
+        |r| r.get::<_, rusqlite::types::Value>(0),
     ) {
-        Ok(t) => t,
+        Ok(value) => value,
         Err(_) => return Ok(Vec::new()),
     };
+    let text = sql_value_text(value).unwrap_or_default();
     let json: Value = serde_json::from_str(&text).map_err(|e| format!("解析聊天历史 JSON 失败: {}", e))?;
     let arr = json.as_array().cloned().unwrap_or_default();
     Ok(arr
@@ -188,9 +199,14 @@ pub fn export_chat_history(
     let export_dir = crate::paths::data_dir().join("exports");
     let _ = fs::create_dir_all(&export_dir);
     let stamp = iso_from_ms_local(crate::crypto::now_ms()).replace([':', ' '], "-");
-    let json_path = export_dir.join(format!("qoder-chats-{}-{}.json", workspace_id, stamp));
+    let safe_id: String = workspace_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .take(80)
+        .collect();
+    let json_path = export_dir.join(format!("qoder-chats-{}-{}.json", safe_id, stamp));
     fs::write(&json_path, serde_json::to_string_pretty(&chats).unwrap_or_default()).map_err(|e| e.to_string())?;
-    let md_path = export_dir.join(format!("qoder-chats-{}-{}.md", workspace_id, stamp));
+    let md_path = export_dir.join(format!("qoder-chats-{}-{}.md", safe_id, stamp));
     let mut lines = vec![format!("# Qoder 会话导出（工作区 {}）", workspace_id), String::new()];
     for chat in &chats {
         let when = chat
@@ -223,32 +239,13 @@ pub fn export_chat_history(
 }
 
 fn iso_from_ms_local(ms: i64) -> String {
-    let secs = ms / 1000;
-    let days = secs / 86400;
-    let (y, m, d) = civil_from_days(days);
-    let rem = secs % 86400;
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        y,
-        m,
-        d,
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
-}
-
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .unwrap_or_else(Local::now)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 #[allow(dead_code)]

@@ -142,6 +142,7 @@ class AccountManager {
           pat: normalized.pat || preserved.pat,
           tokenExpireAt: normalized.tokenExpireAt ?? preserved.tokenExpireAt,
           refreshTokenExpiresAt: normalized.refreshTokenExpiresAt ?? preserved.refreshTokenExpiresAt,
+          label: normalized.label || existing.label,
           group: normalized.group ?? preserved.group,
           quota: normalized.quota ?? preserved.quota,
           plan: normalized.plan ?? preserved.plan,
@@ -289,6 +290,7 @@ class AccountManager {
         securityOauthToken: result.securityOauthToken,
         refreshToken: result.refreshToken,
         tokenExpireAt: result.tokenExpireAt,
+        refreshTokenExpiresAt: result.refreshTokenExpiresAt ?? account.refreshTokenExpiresAt,
         status: "active",
         lastError: "",
       });
