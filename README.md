@@ -23,6 +23,21 @@ Qoder（**国内版 Qoder CN / 国际版 Qoder**）多账号切换 + OpenAI / An
 └──────────────────────────────────────────────────────────────┘
 ```
 
+## 界面预览
+
+> 截图使用演示数据，不代表真实账号信息。
+
+![账号管理](docs/screenshots/accounts-light.png)
+
+![API 反代](docs/screenshots/api-proxy-light.png)
+
+<details>
+<summary>暗色模式</summary>
+
+![暗色模式](docs/screenshots/dark-mode.png)
+
+</details>
+
 ## 功能
 
 | 模块 | 说明 |
@@ -155,6 +170,11 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 - 国际版 legacy 流式端点（api3.qoder.sh）按 qoder2api 移植，未持国际版账号实测。
 
 ## 更新日志
+
+### v1.1.3
+
+- 桌面窗口默认尺寸从 1280×860 调整为 1100×740，最小尺寸 900×600
+- README 增加真实界面预览截图（演示数据）
 
 ### v1.1.2
 

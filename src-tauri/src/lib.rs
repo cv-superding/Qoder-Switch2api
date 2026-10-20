@@ -358,8 +358,8 @@ pub fn run() {
             let parsed: url::Url = url.parse().expect("window url");
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
                 .title("Qoder-Switch2api")
-                .inner_size(1280.0, 860.0)
-                .min_inner_size(960.0, 640.0)
+                .inner_size(1100.0, 740.0)
+                .min_inner_size(900.0, 600.0)
                 .center()
                 .build();
             if let Err(e) = window {
