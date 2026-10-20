@@ -51,6 +51,21 @@ export default function AccountsPage() {
     void fetchAll();
   }, [fetchAll]);
 
+  // 首次进入且用户未手动选择过版本时，优先选中本机已安装的客户端
+  useEffect(() => {
+    if (!status) return;
+    if (localStorage.getItem("qoder-switch2api.edition-tab")) return;
+    const domestic = Boolean(status.editions?.domestic?.client?.exists);
+    const international = Boolean(status.editions?.international?.client?.exists);
+    if (international && !domestic) {
+      setEditionTab("international");
+      localStorage.setItem("qoder-switch2api.edition-tab", "international");
+    } else if (domestic && !international) {
+      setEditionTab("domestic");
+      localStorage.setItem("qoder-switch2api.edition-tab", "domestic");
+    }
+  }, [status]);
+
   useEffect(() => {
     if (accounts.length === 0) return;
     void ensureCredits(accounts.map((a) => a.id));
@@ -86,6 +101,10 @@ export default function AccountsPage() {
   }, [accounts]);
 
   const editionStatus = status?.editions?.[editionTab];
+  const otherEdition: Edition = editionTab === "domestic" ? "international" : "domestic";
+  const otherClient = status?.editions?.[otherEdition]?.client;
+  const editionLabel = editionTab === "domestic" ? "国内版" : "国际版";
+  const otherEditionLabel = otherEdition === "domestic" ? "国内版" : "国际版";
   const currentUid = editionStatus?.currentAccount?.uid;
   const proxyAvailable = (status?.counts.proxyDomestic ?? 0) + (status?.counts.proxyInternational ?? 0);
   const detectedClients = [status?.editions?.domestic?.client, status?.editions?.international?.client].filter(
@@ -125,8 +144,12 @@ export default function AccountsPage() {
   async function onImport() {
     setImporting(true);
     try {
-      const acc = await importLocal(editionTab);
-      toast.success(`已导入本机${editionTab === "domestic" ? "国内版" : "国际版"}账号`, {
+      // 当前版本没有本机客户端、但另一个版本有时，自动从已安装的客户端导入
+      let target = editionTab;
+      if (!editionStatus?.client?.exists && otherClient?.exists) target = otherEdition;
+      const acc = await importLocal(target);
+      if (target !== editionTab) switchTab(target);
+      toast.success(`已导入本机${target === "domestic" ? "国内版" : "国际版"}账号`, {
         description: acc.name || acc.email || acc.uid,
       });
       void fetchAll();
@@ -234,7 +257,6 @@ export default function AccountsPage() {
   }
 
   const client = editionStatus?.client;
-  const editionLabel = editionTab === "domestic" ? "国内版" : "国际版";
 
   return (
     <div>
@@ -317,6 +339,19 @@ export default function AccountsPage() {
           <TriangleAlert />
           <AlertTitle>加载失败</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {status && !editionStatus?.client?.exists && otherClient?.exists ? (
+        <Alert className="mb-4">
+          <TriangleAlert />
+          <AlertTitle>当前是{editionLabel}，但检测到{otherEditionLabel}客户端</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>点击「导入本机账号」会自动从{otherEditionLabel}客户端读取登录态，也可以先切换版本。</span>
+            <Button size="sm" variant="outline" onClick={() => switchTab(otherEdition)}>
+              切换到{otherEditionLabel}
+            </Button>
+          </AlertDescription>
         </Alert>
       ) : null}
 

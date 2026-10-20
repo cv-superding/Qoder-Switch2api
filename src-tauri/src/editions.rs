@@ -107,7 +107,7 @@ pub fn international() -> Edition {
         value: "international".into(),
         label: "国际版".into(),
         product_name: "Qoder".into(),
-        client_dirs: vec!["Qoder".into()],
+        client_dirs: vec!["com.qoder.app.stable".into(), "Qoder".into()],
         client_process_names: vec!["Qoder".into()],
         oauth: OauthEdition {
             login_base_url: "https://qoder.com/device/selectAccounts".into(),

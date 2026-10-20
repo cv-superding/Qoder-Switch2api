@@ -59,7 +59,8 @@ export const EDITIONS = {
     value: "international",
     label: "国际版",
     productName: "Qoder",
-    clientDirs: ["Qoder"],
+    // 新版 Qoder 桌面端实际使用 com.qoder.app.stable；旧版本曾使用 Qoder
+    clientDirs: ["com.qoder.app.stable", "Qoder"],
     clientProcessNames: ["Qoder"],
     oauth: {
       loginBaseUrl: "https://qoder.com/device/selectAccounts",

@@ -84,7 +84,7 @@ Rust 版内置同一 Web 服务（127.0.0.1:8787，/api/* + 嵌入式前端）�
 
 ### 使用步骤
 
-1. **账号管理** → 「OAuth 登录」或「导入本机账号」（自动读取本机 Qoder CN 客户端登录态）
+1. **账号管理** → 「OAuth 登录」或「导入本机账号」（自动读取本机已安装的 Qoder 客户端登录态）
 2. **API 反代** → 打开「启用国内版接口」，监听地址默认 `127.0.0.1:7891`
 3. 客户端接入：`http://127.0.0.1:7891/v1`（OpenAI 兼容）；Codex CLI 用 `/v1/responses`；Claude Code CLI 设 `ANTHROPIC_BASE_URL=http://127.0.0.1:7891`
 
@@ -145,7 +145,7 @@ Rust 版内置同一 Web 服务（127.0.0.1:8787，/api/* + 嵌入式前端）�
 | 用量统计 / 签到日志 | `~/.qoder-switch/usage.json` / `checkin.jsonl` |
 | 会话导出 | `~/.qoder-switch/exports/` |
 | Qoder CN 客户端登录态 | `%APPDATA%/com.qodercn.app.stable/auth.v1.dat`（或 `QoderCN` / `Qoder CN`） |
-| Qoder 国际版客户端登录态 | `%APPDATA%/Qoder/auth.v1.dat` |
+| Qoder 国际版客户端登录态 | `%APPDATA%/com.qoder.app.stable/auth.v1.dat`（兼容旧版 `%APPDATA%/Qoder`） |
 
 > 账号凭证等同密码，请勿分享备份文件。本工具不上传任何数据到第三方服务器。
 
@@ -170,6 +170,12 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 - 国际版 legacy 流式端点（api3.qoder.sh）按 qoder2api 移植，未持国际版账号实测。
 
 ## 更新日志
+
+### v1.1.4
+
+- 支持新版 Qoder 客户端数据目录 `%APPDATA%/com.qoder.app.stable`，修复误报“未安装”、导入本机账号失败
+- 账号页首次进入自动选中本机已安装的版本；选错版本时「导入本机账号」会自动从另一个已安装客户端导入
+- 增加“当前版本未检测到客户端 / 另一版本已安装”的提示与版本切换按钮
 
 ### v1.1.3
 
