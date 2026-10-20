@@ -277,15 +277,12 @@ async fn get_credit(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     // 套餐接口失败不影响额度展示
     let plan = info::get_user_plan(&edition, &account).await.ok();
     let quota_patch = usage.quota.as_ref().map(|q| {
-        json!({
-            "total": q.total,
-            "used": q.used,
-            "remaining": q.remaining,
-            "percentage": q.percentage,
-            "unit": q.unit,
-            "expiresAt": usage.expires_at,
-            "updatedAt": crate::crypto::now_ms()
-        })
+        let mut value = serde_json::to_value(q).unwrap_or_else(|_| json!({}));
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("expiresAt".into(), json!(usage.expires_at));
+            obj.insert("updatedAt".into(), json!(crate::crypto::now_ms()));
+        }
+        value
     });
     let plan_patch = plan.as_ref().map(|plan| {
         json!({

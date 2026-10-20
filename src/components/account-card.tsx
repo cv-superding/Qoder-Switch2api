@@ -103,6 +103,8 @@ export function AccountCard({
   const unit = credit?.quota?.unit || quota?.unit || "credits";
   const expiresAt = credit?.expiresAt ?? quota?.expiresAt ?? null;
   const updatedAt = quota?.updatedAt;
+  const planPart = credit?.quota?.plan ?? quota?.plan ?? null;
+  const addOnPart = credit?.quota?.addOn ?? quota?.addOn ?? null;
   const expired = typeof expiresAt === "number" && expiresAt < Date.now();
   const expiringSoon = typeof expiresAt === "number" && !expired && expiresAt - Date.now() < 7 * 86400000;
   const planTier = account.plan?.planTierName ?? "";
@@ -111,7 +113,9 @@ export function AccountCard({
   if (remaining != null && total) {
     percent = (remaining / total) * 100;
   } else if (typeof credit?.quota?.percentage === "number") {
-    percent = credit.quota.percentage <= 1 ? credit.quota.percentage * 100 : credit.quota.percentage;
+    // 上游 percentage 是「已用比例」，展示需要换算成剩余
+    const used = credit.quota.percentage <= 1 ? credit.quota.percentage : credit.quota.percentage / 100;
+    percent = (1 - used) * 100;
   }
   const clampedPercent = percent == null ? 0 : Math.min(100, Math.max(0, percent));
   // 进度条表示剩余额度，不表示到期紧急程度；到期只通过右侧徽标提示
@@ -400,6 +404,18 @@ export function AccountCard({
                   style={{ width: `${clampedPercent > 0 ? Math.max(2, clampedPercent) : 0}%` }}
                 />
               </div>
+
+              {addOnPart ? (
+                <div
+                  className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] tabular-nums text-muted-foreground"
+                  title="总额度 = 套餐基础额度 + 赠送/签到额度"
+                >
+                  {planPart ? (
+                    <span>基础 {formatCredits(planPart.remaining)} / {formatCredits(planPart.total)}</span>
+                  ) : null}
+                  <span>赠送 {formatCredits(addOnPart.remaining)} / {formatCredits(addOnPart.total)}</span>
+                </div>
+              ) : null}
 
               <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[10.5px] text-muted-foreground">
                 <span className="flex min-w-0 items-center gap-1.5">

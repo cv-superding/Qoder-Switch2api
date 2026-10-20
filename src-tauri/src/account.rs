@@ -84,6 +84,17 @@ fn default_status() -> String {
     "active".into()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaPart {
+    pub total: Option<f64>,
+    pub used: Option<f64>,
+    pub remaining: Option<f64>,
+    pub percentage: Option<f64>,
+    #[serde(default)]
+    pub unit: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaSnapshot {
@@ -97,6 +108,11 @@ pub struct QuotaSnapshot {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub updated_at: Option<i64>,
+    /// 套餐额度与加油包明细（旧数据无此字段）
+    #[serde(default)]
+    pub plan: Option<QuotaPart>,
+    #[serde(default)]
+    pub add_on: Option<QuotaPart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

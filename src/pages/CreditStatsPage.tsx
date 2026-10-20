@@ -35,7 +35,11 @@ function fmtNum(value: number | null | undefined): string {
 function remainingPercent(account: Account, credit: QuotaInfo | undefined): number | null {
   const q = credit?.quota ?? account.quota;
   if (q?.remaining != null && q.total) return Math.min(100, Math.max(0, (q.remaining / q.total) * 100));
-  if (typeof q?.percentage === "number") return Math.min(100, Math.max(0, q.percentage <= 1 ? q.percentage * 100 : q.percentage));
+  if (typeof q?.percentage === "number") {
+    // 上游 percentage 为「已用比例」
+    const used = q.percentage <= 1 ? q.percentage : q.percentage / 100;
+    return Math.min(100, Math.max(0, (1 - used) * 100));
+  }
   return null;
 }
 
@@ -185,6 +189,8 @@ export default function CreditStatsPage() {
                   const unit = credit?.quota?.unit || a.quota?.unit || "credits";
                   const percent = remainingPercent(a, credit);
                   const expireAt = credit?.expiresAt ?? a.quota?.expiresAt ?? null;
+                  const planPart = credit?.quota?.plan ?? a.quota?.plan ?? null;
+                  const addOnPart = credit?.quota?.addOn ?? a.quota?.addOn ?? null;
                   const left = daysLeft(expireAt);
                   const loading = creditLoadingMap[a.id];
                   const error = creditErrorMap[a.id];
@@ -211,6 +217,12 @@ export default function CreditStatsPage() {
                       <td className="px-3 py-3 tabular-nums">
                         <span className="font-medium">{fmtNum(remaining)}</span>
                         <span className="text-muted-foreground"> / {fmtNum(total)} {unit}</span>
+                        {addOnPart ? (
+                          <div className="mt-0.5 text-[10px] text-muted-foreground">
+                            {planPart ? `基础 ${fmtNum(planPart.remaining)}/${fmtNum(planPart.total)} · ` : ""}
+                            赠送 {fmtNum(addOnPart.remaining)}/{fmtNum(addOnPart.total)}
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-3 py-3">
                         {percent == null ? (

@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::account::Account;
+use crate::account::{Account, QuotaPart};
 use crate::cosy::legacy_decode;
 use crate::editions::Edition;
 
@@ -24,6 +24,8 @@ pub struct QuotaValue {
     pub remaining: Option<f64>,
     pub percentage: Option<f64>,
     pub unit: String,
+    pub plan: Option<QuotaPart>,
+    pub add_on: Option<QuotaPart>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -72,15 +74,66 @@ async fn get_json(edition: &Edition, account: &Account, path: &str) -> Result<Va
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-pub async fn get_quota_usage(edition: &Edition, account: &Account) -> Result<QuotaInfo, String> {
-    let data = get_json(edition, account, &edition.oauth.quota_usage_path).await?;
-    let quota = data.get("userQuota").map(|q| QuotaValue {
+fn quota_part(value: Option<&Value>) -> Option<QuotaPart> {
+    let q = value?;
+    Some(QuotaPart {
         total: q.get("total").and_then(|v| v.as_f64()),
         used: q.get("used").and_then(|v| v.as_f64()),
         remaining: q.get("remaining").and_then(|v| v.as_f64()),
         percentage: q.get("percentage").and_then(|v| v.as_f64()),
         unit: q.get("unit").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-    });
+    })
+}
+
+/// 合并套餐额度与加油包（addOnQuota）；上游 percentage 为「已用比例」
+fn combine_quota(plan: Option<QuotaPart>, add_on: Option<QuotaPart>) -> Option<QuotaValue> {
+    // 上游可能返回 total=0 的空 addOnQuota，展示上没有意义
+    let add_on = add_on.filter(|q| q.total.unwrap_or(0.0) > 0.0 || q.remaining.unwrap_or(0.0) > 0.0);
+    let (total, used, remaining, percentage, unit) = match (&plan, &add_on) {
+        (None, None) => return None,
+        (Some(plan), None) => {
+            (plan.total, plan.used, plan.remaining, plan.percentage, plan.unit.clone())
+        }
+        (None, Some(add_on)) => (
+            add_on.total,
+            add_on.used,
+            add_on.remaining,
+            add_on.percentage,
+            add_on.unit.clone(),
+        ),
+        (Some(plan), Some(add_on)) => {
+            let total = plan.total.zip(add_on.total).map(|(a, b)| a + b);
+            let used = plan.used.zip(add_on.used).map(|(a, b)| a + b);
+            let remaining = plan.remaining.zip(add_on.remaining).map(|(a, b)| a + b);
+            let percentage = total
+                .zip(used)
+                .filter(|(total, _)| *total > 0.0)
+                .map(|(total, used)| used / total);
+            let unit = if plan.unit.is_empty() {
+                add_on.unit.clone()
+            } else {
+                plan.unit.clone()
+            };
+            (total, used, remaining, percentage, unit)
+        }
+    };
+    Some(QuotaValue {
+        total,
+        used,
+        remaining,
+        percentage,
+        unit,
+        plan,
+        add_on,
+    })
+}
+
+pub async fn get_quota_usage(edition: &Edition, account: &Account) -> Result<QuotaInfo, String> {
+    let data = get_json(edition, account, &edition.oauth.quota_usage_path).await?;
+    let quota = combine_quota(
+        quota_part(data.get("userQuota")),
+        quota_part(data.get("addOnQuota")),
+    );
     Ok(QuotaInfo {
         usage_type: data.get("usageType").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         total_usage_percentage: data.get("totalUsagePercentage").and_then(|v| v.as_f64()),

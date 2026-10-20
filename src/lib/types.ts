@@ -44,6 +44,8 @@ export interface Account {
     unit: string;
     expiresAt: number | null;
     updatedAt: number;
+    plan?: QuotaPart | null;
+    addOn?: QuotaPart | null;
   } | null;
   plan: PlanInfo | null;
   createdAt: number;
@@ -96,12 +98,28 @@ export interface AppStatus {
   sqlite: boolean;
 }
 
+export interface QuotaPart {
+  total: number | null;
+  used: number | null;
+  remaining: number | null;
+  percentage: number | null;
+  unit: string;
+}
+
 export interface QuotaInfo {
   usageType: string;
   totalUsagePercentage: number | null;
   isQuotaExceeded: boolean;
   expiresAt: number | null;
-  quota: { total: number | null; used: number | null; remaining: number | null; percentage: number | null; unit: string } | null;
+  quota: {
+    total: number | null;
+    used: number | null;
+    remaining: number | null;
+    percentage: number | null;
+    unit: string;
+    plan?: QuotaPart | null;
+    addOn?: QuotaPart | null;
+  } | null;
 }
 
 export interface PlanInfo {

@@ -23,6 +23,42 @@ function authHeaders(account) {
   return { Authorization: `Bearer ${account.pat || account.securityOauthToken}` };
 }
 
+function quotaPart(raw) {
+  if (!raw) return null;
+  return {
+    total: raw.total ?? null,
+    used: raw.used ?? null,
+    remaining: raw.remaining ?? null,
+    percentage: raw.percentage ?? null,
+    unit: raw.unit || "",
+  };
+}
+
+/**
+ * 合并套餐额度与加油包（addOnQuota）。
+ * 上游 percentage 是「已用比例」，合并后的 percentage 保持同一语义。
+ */
+function combineQuota(plan, addOn) {
+  // 上游可能返回 total=0 的空 addOnQuota，展示上没有意义
+  if (addOn && !(Number(addOn.total) > 0) && !(Number(addOn.remaining) > 0)) addOn = null;
+  if (!plan && !addOn) return null;
+  if (!plan) return { ...addOn, plan: null, addOn };
+  if (!addOn) return { ...plan, plan, addOn: null };
+  const total = plan.total != null && addOn.total != null ? plan.total + addOn.total : null;
+  const used = plan.used != null && addOn.used != null ? plan.used + addOn.used : null;
+  const remaining =
+    plan.remaining != null && addOn.remaining != null ? plan.remaining + addOn.remaining : null;
+  return {
+    total,
+    used,
+    remaining,
+    percentage: total && used != null ? used / total : null,
+    unit: plan.unit || addOn.unit || "",
+    plan,
+    addOn,
+  };
+}
+
 /** 额度用量：/api/v2/quota/usage */
 export async function getQuotaUsage(edition, account) {
   const result = await fetchJson(openApi(edition, edition.oauth.quotaUsagePath), {
@@ -36,15 +72,7 @@ export async function getQuotaUsage(edition, account) {
     totalUsagePercentage: data.totalUsagePercentage ?? null,
     isQuotaExceeded: Boolean(data.isQuotaExceeded),
     expiresAt: normalizeTime(data.expiresAt),
-    quota: data.userQuota
-      ? {
-          total: data.userQuota.total ?? null,
-          used: data.userQuota.used ?? null,
-          remaining: data.userQuota.remaining ?? null,
-          percentage: data.userQuota.percentage ?? null,
-          unit: data.userQuota.unit || "",
-        }
-      : null,
+    quota: combineQuota(quotaPart(data.userQuota), quotaPart(data.addOnQuota)),
   };
 }
 
