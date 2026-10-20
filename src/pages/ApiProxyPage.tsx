@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  Activity, Check, Copy, Eye, EyeOff, Gauge, Globe2, KeyRound, ListPlus, Loader2, Network, RefreshCw, Save,
+  Activity, Check, Copy, Eye, EyeOff, Gauge, Globe2, Info, KeyRound, ListPlus, Loader2, Network, RefreshCw, Save,
   ServerCog, Trash2, TriangleAlert, Users,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 
 import { EmptyState } from "@/components/empty-state";
@@ -24,6 +25,7 @@ export default function ApiProxyPage({ edition }: { edition: Edition }) {
   const [config, setConfig] = useState<ProxyConfig | null>(null);
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
   const [proxyAccounts, setProxyAccounts] = useState(0);
+  const [otherProxyAccounts, setOtherProxyAccounts] = useState(0);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -38,6 +40,9 @@ export default function ApiProxyPage({ edition }: { edition: Edition }) {
 
   const isDomestic = edition === "domestic";
   const label = isDomestic ? "国内版" : "国际版";
+  const productLabel = isDomestic ? "Qoder CN（国内版）" : "Qoder（国际版）";
+  const otherEdition: Edition = isDomestic ? "international" : "domestic";
+  const otherLabel = isDomestic ? "国际版" : "国内版";
 
   useEffect(() => {
     let cancelled = false;
@@ -55,6 +60,7 @@ export default function ApiProxyPage({ edition }: { edition: Edition }) {
         setConfig(cfgRes.proxy[edition]);
         setProxyStatus(editionStatus.proxy);
         setProxyAccounts(editionStatus.proxyAccounts);
+        setOtherProxyAccounts(statusRes.editions[otherEdition].proxyAccounts);
         const usageRes = await api.api.getUsage(edition).catch(() => null);
         if (!cancelled && usageRes) setUsage(usageRes);
       } catch (e) {
@@ -76,6 +82,7 @@ export default function ApiProxyPage({ edition }: { edition: Edition }) {
     const statusRes = await api.api.getStatus();
     setProxyStatus(statusRes.editions[edition].proxy);
     setProxyAccounts(statusRes.editions[edition].proxyAccounts);
+    setOtherProxyAccounts(statusRes.editions[otherEdition].proxyAccounts);
   }
 
   async function save(next: ProxyConfig, message = "配置已保存") {
@@ -143,7 +150,7 @@ export default function ApiProxyPage({ edition }: { edition: Edition }) {
     <div>
       <PageHeader
         icon={isDomestic ? Network : Globe2}
-        title={`${label} API 反代`}
+        title={`${productLabel} API 反代`}
         description={`把${label}账号池包装成 OpenAI / Anthropic 兼容的本地网关。请求按账号池轮转，失败自动冷却并换号。`}
         actions={
           <>
@@ -177,6 +184,25 @@ export default function ApiProxyPage({ edition }: { edition: Edition }) {
         }
       />
 
+      {!loading && proxyAccounts === 0 ? (
+        <Alert className="mb-5">
+          <Info />
+          <AlertTitle>当前{label}没有可用账号</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>
+              {otherProxyAccounts > 0
+                ? `检测到${otherLabel}已有 ${otherProxyAccounts} 个可用账号。两个版本的账号池完全独立，反代不会自动混用。`
+                : "请先在「账号管理」添加账号，并确认账号分组不是「桌面端」。"}
+            </span>
+            <Button asChild size="sm" variant="outline">
+              <Link to={otherProxyAccounts > 0 ? `/api-proxy/${otherEdition}` : "/"}>
+                {otherProxyAccounts > 0 ? `前往${otherLabel}反代` : "前往账号管理"}
+              </Link>
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       {loading ? (
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
@@ -206,7 +232,13 @@ export default function ApiProxyPage({ edition }: { edition: Edition }) {
               tone={running ? "brand" : enabled ? "amber" : "neutral"}
               hint={running ? `端口 ${listenHost.split(":").pop()}` : enabled ? "请检查端口占用" : "打开下方开关启用"}
             />
-            <StatCard label="可用账号" value={proxyAccounts} icon={Users} tone="sky" hint="参与反代的账号池" />
+            <StatCard
+              label="可用账号"
+              value={proxyAccounts}
+              icon={Users}
+              tone={proxyAccounts > 0 ? "sky" : "neutral"}
+              hint={proxyAccounts > 0 ? "参与反代的账号池" : "当前版本暂无可用账号"}
+            />
             <StatCard label="累计请求" value={(usage?.totals.requests ?? 0).toLocaleString()} icon={Gauge} hint="本版本累计" />
             <StatCard
               label="失败请求"
@@ -408,7 +440,14 @@ export default function ApiProxyPage({ edition }: { edition: Edition }) {
                   <h3 className="text-[13px] font-semibold">额外放行模型</h3>
                   <p className="mt-0.5 text-[11px] text-muted-foreground">加入 /v1/models 并跳过模型校验。</p>
                 </div>
-                <Button size="sm" variant="outline" className="h-8" onClick={fetchModels} disabled={modelsLoading}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8"
+                  onClick={fetchModels}
+                  disabled={modelsLoading || proxyAccounts === 0}
+                  title={proxyAccounts === 0 ? "当前版本没有可用账号，无法获取上游模型" : undefined}
+                >
                   {modelsLoading ? <Loader2 className="animate-spin" /> : <ListPlus />}
                   获取上游模型
                 </Button>

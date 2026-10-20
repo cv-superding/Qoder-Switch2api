@@ -13,7 +13,7 @@ import { SwitchAccountDialog } from "@/components/switch-account-dialog";
 import { ExportAccountsDialog, ImportAccountsDialog } from "@/components/account-backup-dialogs";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
-import { QoderCnMark, QoderMark } from "@/components/product-marks";
+import { QoderCnMark, QoderMark, StatusDot } from "@/components/product-marks";
 import { Segmented } from "@/components/segmented";
 import { StatCard } from "@/components/stat-card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -110,6 +110,9 @@ export default function AccountsPage() {
   const detectedClients = [status?.editions?.domestic?.client, status?.editions?.international?.client].filter(
     (client) => client?.exists,
   ).length;
+  const detectedClientEditions = (["domestic", "international"] as Edition[]).filter(
+    (value) => status?.editions?.[value]?.client?.exists,
+  );
   const needsAttention = accounts.filter(
     (a) => a.status === "needs_relogin" || a.cooling || (typeof a.tokenExpireAt === "number" && a.tokenExpireAt < Date.now()),
   ).length;
@@ -376,23 +379,29 @@ export default function AccountsPage() {
             options={[
               {
                 value: "domestic",
-                label: "国内版",
+                label: "国内版 Qoder CN",
                 count: editionCounts.domestic,
                 icon: <QoderCnMark size={14} />,
               },
               {
                 value: "international",
-                label: "国际版",
+                label: "国际版 Qoder",
                 count: editionCounts.international,
                 icon: <QoderMark size={14} />,
               },
             ]}
           />
 
-          <div className="hidden min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground xl:flex">
+          <div className="hidden min-w-0 items-center gap-2 text-[11.5px] text-muted-foreground md:flex">
             <span className="text-border">|</span>
-            <span className="truncate font-mono text-[10.5px]" title={client?.dir}>
-              {client?.dir || "未检测到客户端目录"}
+            <StatusDot on={detectedClients > 0} />
+            <span className="whitespace-nowrap" title={detectedClientEditions.map((value) => status?.editions?.[value]?.client?.dir).filter(Boolean).join("\n")}>
+              本机客户端：
+              {detectedClientEditions.length > 0
+                ? detectedClientEditions
+                    .map((value) => (value === "domestic" ? "Qoder CN（国内版）" : "Qoder（国际版）"))
+                    .join(" + ")
+                : "未检测到"}
             </span>
           </div>
 
