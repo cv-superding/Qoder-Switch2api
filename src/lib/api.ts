@@ -2,7 +2,7 @@
 
 import type {
   Account, AppStatus, BackupResult, ChatItem, CheckinResult, CheckinState, ClientInfo, PlanInfo, ProxyConfig, QuotaInfo,
-  Settings, UpdateInfo, UsageStats, Workspace,
+  Settings, UpdateDownloadStatus, UpdateInfo, UsageStats, Workspace,
 } from "@/lib/types";
 
 const BASE = "/api";
@@ -125,4 +125,7 @@ export const api = {
   getAbout: () =>
     request<{ name: string; version: string; description: string; references: string[] }>("/about"),
   checkUpdate: (force = false) => request<UpdateInfo>(`/update/check${force ? "?force=1" : ""}`),
+  startUpdateDownload: () => request<UpdateDownloadStatus>("/update/download", { method: "POST", body: "{}" }),
+  getUpdateDownloadStatus: () => request<UpdateDownloadStatus>("/update/download/status"),
+  installUpdate: () => request<{ ok: boolean }>("/update/install", { method: "POST", body: "{}" }),
 };

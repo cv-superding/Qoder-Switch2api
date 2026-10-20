@@ -27,6 +27,9 @@ pub fn create_api_router(state: Arc<AppState>) -> Router {
         .route("/status", get(get_status))
         .route("/about", get(get_about))
         .route("/update/check", get(check_update))
+        .route("/update/download", post(start_update_download))
+        .route("/update/download/status", get(get_update_download_status))
+        .route("/update/install", post(install_update))
         .route("/accounts", get(list_accounts).post(add_account))
         .route("/accounts/export", post(export_accounts))
         .route("/accounts/import", post(import_accounts))
@@ -146,6 +149,24 @@ async fn check_update(Query(q): Query<HashMap<String, String>>) -> Response {
     match crate::update::check_update(q.get("force").map(|v| v == "1").unwrap_or(false)).await {
         Ok(data) => ok_json(data),
         Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn start_update_download() -> Response {
+    match crate::update::start_download().await {
+        Ok(data) => ok_json(data),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn get_update_download_status() -> Response {
+    ok_json(crate::update::get_download_status())
+}
+
+async fn install_update() -> Response {
+    match crate::update::install_downloaded_update() {
+        Ok(data) => ok_json(data),
+        Err(e) => err(StatusCode::BAD_REQUEST, &e),
     }
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   CalendarCheck, Check, ChevronDown, Download, ExternalLink, FolderGit2, Github, Info, Loader2, Monitor, Moon, Palette,
-  RefreshCw, Save, ShieldCheck, SlidersHorizontal, Star, Sun, TriangleAlert,
+  Power, RefreshCw, Save, ShieldCheck, SlidersHorizontal, Star, Sun, TriangleAlert,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -25,6 +25,11 @@ const THEME_OPTIONS: { value: ThemeMode; label: string; hint: string; icon: type
   { value: "system", label: "跟随系统", hint: "自动切换", icon: Monitor },
 ];
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 const ENDPOINT_FIELDS: { key: string; label: string; hint: string }[] = [
   { key: "openApiBaseUrl", label: "OpenAPI 地址", hint: "账号 / 额度 / 签到接口" },
   { key: "streamUrl", label: "流式对话地址", hint: "Cosy 签名 SSE 接口" },
@@ -43,7 +48,12 @@ export default function SettingsPage() {
   const [loadError, setLoadError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [theme, setLocalTheme] = useTheme();
-  const { info: updateInfo, checking: updateChecking, error: updateError, check: checkUpdate } = useUpdateStore();
+  const {
+    info: updateInfo, checking: updateChecking, error: updateError, check: checkUpdate,
+    download: updateDownload, downloading: updateDownloading, readyToInstall: updateReady,
+    installing: updateInstalling, downloadError: updateDownloadError,
+    startDownload: startUpdateDownload, installUpdate: installUpdateApp,
+  } = useUpdateStore();
 
   useEffect(() => {
     setLoadError("");
@@ -99,10 +109,18 @@ export default function SettingsPage() {
   }
 
   function openUpdate() {
-    const url = updateInfo?.downloadUrl || updateInfo?.releaseUrl || "https://github.com/cv-superding/Qoder-Switch2api/releases/latest";
-    void api.api.openExternal(url).catch((e) => {
-      toast.error("打开失败", { description: api.asError(e) });
-    });
+    void startUpdateDownload();
+  }
+
+  async function handleInstall() {
+    if (!updateInfo) return;
+    if (!window.confirm(`将退出当前程序并安装 v${updateInfo.latestVersion}，是否继续？`)) return;
+    toast.info("正在退出并安装更新…");
+    try {
+      await installUpdateApp();
+    } catch (e) {
+      toast.error("安装更新失败", { description: api.asError(e) });
+    }
   }
 
   if (!settings) {
@@ -406,28 +424,57 @@ export default function SettingsPage() {
             <Badge variant="secondary" className="h-6 font-mono text-[10px]">{about?.name ?? "Qoder-Switch2api"} v{about?.version ?? "—"}</Badge>
             <span>仅供学习研究使用，请遵守 Qoder 服务条款。</span>
           </div>
-          <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px]">
-            {updateChecking ? (
-              <span className="text-muted-foreground">正在检查更新…</span>
-            ) : updateInfo?.hasUpdate ? (
-              <>
-                <Badge variant="warning" className="h-6 text-[10px]">新版本 v{updateInfo.latestVersion}</Badge>
-                <span className="text-muted-foreground">当前 v{updateInfo.currentVersion}</span>
-                <Button variant="outline" size="sm" className="h-7 px-2 text-[10.5px]" onClick={openUpdate}>
-                  <Download className="size-3" />
-                  下载更新
-                </Button>
-              </>
-            ) : updateInfo ? (
-              <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
-                <Check className="size-3.5" />
-                已是最新版本 v{updateInfo.currentVersion}
-              </span>
-            ) : updateError ? (
-              <span className="text-destructive">检查更新失败：{updateError}</span>
-            ) : (
-              <span className="text-muted-foreground">程序启动时会自动检查更新</span>
-            )}
+          <div className="mt-2.5 space-y-2 text-[11px]">
+            <div className="flex flex-wrap items-center gap-2">
+              {updateChecking ? (
+                <span className="text-muted-foreground">正在检查更新…</span>
+              ) : updateReady ? (
+                <>
+                  <Badge variant="success" className="h-6 text-[10px]">更新已下载</Badge>
+                  <span className="text-muted-foreground">v{updateInfo?.latestVersion}</span>
+                  <Button variant="outline" size="sm" className="h-7 px-2 text-[10.5px]" onClick={() => void handleInstall()} disabled={updateInstalling}>
+                    {updateInstalling ? <Loader2 className="size-3 animate-spin" /> : <Power className="size-3" />}
+                    {updateInstalling ? "正在重启" : "重启并安装"}
+                  </Button>
+                </>
+              ) : updateDownloading ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin text-primary" />
+                  <span className="tabular-nums text-muted-foreground">
+                    下载中 {Math.round(updateDownload?.percent ?? 0)}% · {formatBytes(updateDownload?.downloaded ?? 0)} / {formatBytes(updateDownload?.total ?? 0)}
+                  </span>
+                </>
+              ) : updateInfo?.hasUpdate ? (
+                <>
+                  <Badge variant="warning" className="h-6 text-[10px]">新版本 v{updateInfo.latestVersion}</Badge>
+                  <span className="text-muted-foreground">当前 v{updateInfo.currentVersion}</span>
+                  <Button variant="outline" size="sm" className="h-7 px-2 text-[10.5px]" onClick={openUpdate}>
+                    <Download className="size-3" />
+                    下载更新
+                  </Button>
+                </>
+              ) : updateInfo ? (
+                <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+                  <Check className="size-3.5" />
+                  已是最新版本 v{updateInfo.currentVersion}
+                </span>
+              ) : updateError ? (
+                <span className="text-destructive">检查更新失败：{updateError}</span>
+              ) : (
+                <span className="text-muted-foreground">程序启动时会自动检查更新</span>
+              )}
+            </div>
+            {updateDownloading ? (
+              <div className="h-1.5 max-w-md overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-primary transition-[width] duration-300"
+                  style={{ width: `${Math.max(0, Math.min(100, updateDownload?.percent ?? 0))}%` }}
+                />
+              </div>
+            ) : null}
+            {updateDownloadError ? (
+              <div className="text-destructive">下载失败：{updateDownloadError}</div>
+            ) : null}
           </div>
           {about?.references?.length ? (
             <div className="mt-3 space-y-1">

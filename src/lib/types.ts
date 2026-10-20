@@ -143,6 +143,16 @@ export interface UpdateInfo {
   notes: string;
 }
 
+export interface UpdateDownloadStatus {
+  state: "idle" | "downloading" | "done" | "error" | string;
+  downloaded: number;
+  total: number;
+  percent: number;
+  path: string;
+  error: string;
+  version: string;
+}
+
 export interface UsageStats {
   totals: { requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number };
   byAccount: { name: string; requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number }[];

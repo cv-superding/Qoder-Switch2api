@@ -1,7 +1,7 @@
 {
   "name": "qoder-switch2api",
   "private": true,
-  "version": "1.1.14",
+  "version": "1.1.15",
   "author": "qoder-switch2api",
   "license": "MIT",
   "type": "module",
@@ -40,6 +40,7 @@
     "recharts": "^2.15.4",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.6.0",
+    "undici": "^6.29.1",
     "zustand": "^5.0.15"
   },
   "devDependencies": {

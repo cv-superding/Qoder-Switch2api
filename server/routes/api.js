@@ -14,7 +14,7 @@ import { usageStats } from "../proxy/usage.js";
 import { loadJson, saveJson, appendJsonl, readJsonl } from "../store.js";
 import { randomId } from "../crypto.js";
 import { APP_NAME, APP_VERSION } from "../version.js";
-import { checkUpdate } from "../update.js";
+import { checkUpdate, getDownloadStatus, installDownloadedUpdate, startDownload } from "../update.js";
 
 export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServers, getEdition, detectClient }) {
   const router = express.Router();
@@ -487,6 +487,26 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
       res.json(data);
     } catch (e) {
       res.status(502).json({ error: e.message });
+    }
+  });
+
+  router.post("/update/download", async (req, res) => {
+    try {
+      res.json(await startDownload());
+    } catch (e) {
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  router.get("/update/download/status", (req, res) => {
+    res.json(getDownloadStatus());
+  });
+
+  router.post("/update/install", (req, res) => {
+    try {
+      res.json(installDownloadedUpdate());
+    } catch (e) {
+      res.status(400).json({ error: e.message });
     }
   });
 
