@@ -284,6 +284,19 @@ async fn run_with_account(
             }
             Some(err) => {
                 let status_code = parse_status_code(&err);
+                // 请求/模型本身的错误：换号也不会成功，也不能把健康账号打进冷却
+                if matches!(status_code, 400 | 404 | 413 | 415 | 422) {
+                    let message = format!(
+                        "{}（模型 {} 拒绝了请求，已停止重试；请检查上下文长度、工具/参数兼容性或更换模型）",
+                        err, model
+                    );
+                    return Err(UpstreamFailure {
+                        status: StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_REQUEST),
+                        message,
+                        account_id: account.id.clone(),
+                        account_name: account_display_name(&account),
+                    });
+                }
                 {
                     let mut accounts = state.accounts.write().await;
                     accounts.mark_failure(&account.id, status_code, &err);

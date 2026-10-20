@@ -503,9 +503,14 @@ async function runWithAccount(edition, model, req) {
       accountManager.markSuccess(account.id);
       return { ok: true, account, events };
     }
-    // 失败：冷却并换号重试
+    // 失败：先判断是否为请求/模型本身的错误
     const statusMatch = /HTTP (\d{3})/.exec(failed);
     const statusCode = statusMatch ? Number(statusMatch[1]) : 0;
+    if ([400, 404, 413, 415, 422].includes(statusCode)) {
+      // 换号也不会成功，且不应把健康账号打进冷却
+      const detail = `${failed}（模型 ${model} 拒绝了请求，已停止重试；请检查上下文长度、工具/参数兼容性或更换模型）`;
+      return { ok: false, error: detail, status: statusCode, account };
+    }
     accountManager.markFailure(account.id, statusCode, failed);
     if (statusCode === 401 || statusCode === 403) {
       const refreshed = await accountManager.tryRefresh(account.id);
