@@ -192,37 +192,71 @@ fn field<'a>(c: &'a Value, snake: &str, camel: &str) -> Option<&'a str> {
         .or_else(|| c.get(camel).and_then(|v| v.as_str()))
 }
 
-/// 找到今天可领取的签到活动
-pub fn find_claimable_checkin(campaigns: &[Value]) -> Option<Value> {
-    for c in campaigns {
-        let action_type = field(c, "action_type", "actionType").unwrap_or("");
-        let claim_status = field(c, "claim_status", "claimStatus").unwrap_or("");
-        if action_type == "CLAIM_BENEFIT" && claim_status == "CLAIMABLE" {
-            let id = field(c, "id", "campaignId").or_else(|| c.get("campaignId").and_then(|v| v.as_str()));
-            return Some(json!({
-                "id": id.unwrap_or(""),
-                "name": field(c, "name", "title").unwrap_or("每日奖励"),
-                "rewardCredit": c.get("rewardCredit")
-                    .or_else(|| c.get("reward_credit"))
-                    .or_else(|| c.get("credit"))
-                    .and_then(|v| v.as_f64())
-            }));
-        }
-    }
-    None
+fn campaign_action(c: &Value) -> String {
+    field(c, "action_type", "actionType").unwrap_or("").trim().to_ascii_uppercase()
 }
 
+fn campaign_status(c: &Value) -> String {
+    field(c, "claim_status", "claimStatus").unwrap_or("").trim().to_ascii_uppercase()
+}
+
+fn campaign_amount(c: &Value) -> f64 {
+    c.get("benefit")
+        .and_then(|b| b.get("amount"))
+        .and_then(|v| v.as_f64())
+        .or_else(|| c.get("rewardCredit").and_then(|v| v.as_f64()))
+        .or_else(|| c.get("reward_credit").and_then(|v| v.as_f64()))
+        .or_else(|| c.get("credit").and_then(|v| v.as_f64()))
+        .unwrap_or(0.0)
+}
+
+/// 积分类活动：新版带 benefit.kind=CREDITS，部分老活动 kind 为空
+fn is_credit_campaign(c: &Value) -> bool {
+    let kind = c
+        .get("benefit")
+        .and_then(|b| b.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    kind.is_empty() || kind == "CREDITS"
+}
+
+/// 可领取的签到活动（可同时存在多个）
+pub fn find_claimable_checkins(campaigns: &[Value]) -> Vec<Value> {
+    campaigns
+        .iter()
+        .filter(|c| {
+            let action = campaign_action(c);
+            campaign_status(c) == "CLAIMABLE"
+                && (action.is_empty() || action == "CLAIM_BENEFIT")
+                && is_credit_campaign(c)
+        })
+        .filter_map(|c| {
+            let id = c
+                .get("id")
+                .or_else(|| c.get("campaignId"))
+                .and_then(|v| v.as_str())?;
+            Some(json!({
+                "id": id,
+                "name": field(c, "name", "title").unwrap_or("每日奖励"),
+                "rewardCredit": if campaign_amount(c) > 0.0 { Some(campaign_amount(c)) } else { None }
+            }))
+        })
+        .collect()
+}
+
+pub fn find_claimable_checkin(campaigns: &[Value]) -> Option<Value> {
+    find_claimable_checkins(campaigns).into_iter().next()
+}
+
+/// 今日是否已签到：只认积分类活动的 CLAIMED / REPLAYED
 pub fn today_checked_in(campaigns: &[Value]) -> bool {
-    for c in campaigns {
-        if field(c, "action_type", "actionType").unwrap_or("") != "CLAIM_BENEFIT" {
-            continue;
-        }
-        let claim_status = field(c, "claim_status", "claimStatus").unwrap_or("");
-        if claim_status == "CLAIMED" || claim_status == "REPLAYED" {
-            return true;
-        }
-    }
-    false
+    campaigns.iter().any(|c| {
+        let status = campaign_status(c);
+        (status == "CLAIMED" || status == "REPLAYED")
+            && (is_credit_campaign(c) || campaign_amount(c) > 0.0)
+    })
 }
 
 /// 领取奖励：POST /sash/api/v1/me/campaigns/{id}/claim（幂等）

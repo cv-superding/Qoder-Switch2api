@@ -59,6 +59,11 @@ export function authDatPath(clientDir) {
   return path.join(clientDir, "auth.v1.dat");
 }
 
+/** 新版客户端会话数据库 */
+export function mainDbPath(clientDir) {
+  return path.join(clientDir, "main.sqlite");
+}
+
 /** 新版客户端 machine id 文件 */
 export function machineIdPath(clientDir) {
   return path.join(clientDir, "auth.machine-id");

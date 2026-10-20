@@ -70,6 +70,10 @@ pub fn auth_dat_path(client_dir: &std::path::Path) -> PathBuf {
     client_dir.join("auth.v1.dat")
 }
 
+pub fn main_db_path(client_dir: &std::path::Path) -> PathBuf {
+    client_dir.join("main.sqlite")
+}
+
 pub fn machine_id_path(client_dir: &std::path::Path) -> PathBuf {
     client_dir.join("auth.machine-id")
 }

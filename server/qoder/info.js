@@ -115,34 +115,64 @@ export async function listCampaigns(edition, account) {
   return list;
 }
 
-/**
- * 找到今天可领取的签到活动。
- * 只认 actionType === "CLAIM_BENEFIT" 且 claimStatus === "CLAIMABLE"。
- */
-export function findClaimableCheckin(campaigns) {
-  for (const c of campaigns || []) {
-    const actionType = c.actionType || c.action_type || "";
-    const claimStatus = c.claimStatus || c.claim_status || "";
-    if (actionType === "CLAIM_BENEFIT" && claimStatus === "CLAIMABLE") {
-      return {
-        id: c.id || c.campaignId,
-        name: c.name || c.title || "每日奖励",
-        rewardCredit: c.rewardCredit ?? c.reward_credit ?? c.credit ?? null,
-      };
-    }
-  }
-  return null;
+function campaignField(c, snake, camel) {
+  return c?.[snake] ?? c?.[camel] ?? "";
 }
 
-/** 今日是否已签到 */
+function campaignAction(c) {
+  return String(campaignField(c, "action_type", "actionType")).trim().toUpperCase();
+}
+
+function campaignStatus(c) {
+  return String(campaignField(c, "claim_status", "claimStatus")).trim().toUpperCase();
+}
+
+function campaignAmount(c) {
+  const raw = c?.benefit?.amount ?? c?.rewardCredit ?? c?.reward_credit ?? c?.credit;
+  const amount = Number(raw);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+/** 积分类活动：新版带 benefit.kind=CREDITS，部分老活动 kind 为空 */
+function isCreditCampaign(c) {
+  const kind = String(c?.benefit?.kind ?? "").trim().toUpperCase();
+  return kind === "" || kind === "CREDITS";
+}
+
+/**
+ * 可领取的签到活动。
+ * 领取后上游会把 actionType 降级为 VIEW_DETAILS，因此判据以 claimStatus 为主；
+ * actionType 为空或 CLAIM_BENEFIT 都算可领。
+ */
+export function findClaimableCheckins(campaigns) {
+  return (campaigns || [])
+    .filter((c) => {
+      const action = campaignAction(c);
+      return (
+        campaignStatus(c) === "CLAIMABLE" &&
+        (action === "" || action === "CLAIM_BENEFIT") &&
+        isCreditCampaign(c)
+      );
+    })
+    .map((c) => ({
+      id: c.id || c.campaignId,
+      name: c.name || c.title || "每日奖励",
+      rewardCredit: campaignAmount(c) || null,
+    }))
+    .filter((c) => c.id);
+}
+
+export function findClaimableCheckin(campaigns) {
+  return findClaimableCheckins(campaigns)[0] ?? null;
+}
+
+/** 今日是否已签到：只认积分类活动的 CLAIMED / REPLAYED */
 export function todayCheckedIn(campaigns) {
-  for (const c of campaigns || []) {
-    const actionType = c.actionType || c.action_type || "";
-    if (actionType !== "CLAIM_BENEFIT") continue;
-    const claimStatus = c.claimStatus || c.claim_status || "";
-    if (claimStatus === "CLAIMED" || claimStatus === "REPLAYED") return true;
-  }
-  return false;
+  return (campaigns || []).some(
+    (c) =>
+      ["CLAIMED", "REPLAYED"].includes(campaignStatus(c)) &&
+      (isCreditCampaign(c) || campaignAmount(c) > 0),
+  );
 }
 
 /** 领取奖励：POST /sash/api/v1/me/campaigns/{id}/claim（幂等） */

@@ -98,6 +98,8 @@ export interface AppStatus {
   sqlite: boolean;
 }
 
+export type CheckinState = "checked" | "claimable" | "none" | "unavailable" | "error";
+
 export interface QuotaPart {
   total: number | null;
   used: number | null;

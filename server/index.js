@@ -180,26 +180,31 @@ async function runAutoCheckin(force = false) {
   if (!force && now.getHours() < (settings.autoCheckin?.hour ?? 9)) return;
   const today = localDayKey(now);
   if (!force && lastCheckinDay === today) return;
-  lastCheckinDay = today;
   const accounts = accountManager.list().filter((a) => a.status !== "disabled");
+  let failed = false;
   for (const account of accounts) {
     const edition = effectiveEdition(account.edition);
     const full = accountManager.get(account.id);
     try {
       const campaigns = await info.listCampaigns(edition, full);
-      if (info.todayCheckedIn(campaigns)) continue;
-      const claimable = info.findClaimableCheckin(campaigns);
-      if (!claimable) continue;
-      await info.claimCampaign(edition, full, claimable.id);
+      const claimables = info.findClaimableCheckins(campaigns);
+      if (claimables.length === 0) continue;
+      let reward = 0;
+      for (const claimable of claimables) {
+        const claim = await info.claimCampaign(edition, full, claimable.id);
+        const credit = Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
+        if (Number.isFinite(credit)) reward += credit;
+      }
       appendJsonl("checkin.jsonl", {
         accountId: account.id,
         edition: account.edition,
         result: "success",
         auto: true,
-        rewardCredit: claimable.rewardCredit ?? null,
+        rewardCredit: reward || null,
       });
       console.log(`[auto-checkin] ${account.name || account.email || account.id} 签到成功`);
     } catch (e) {
+      failed = true;
       appendJsonl("checkin.jsonl", {
         accountId: account.id,
         edition: account.edition,
@@ -209,6 +214,8 @@ async function runAutoCheckin(force = false) {
       });
     }
   }
+  // 有失败就不盖章，10 分钟后的下一轮会重试；全部处理成功才跳过当天剩余轮次
+  if (!failed) lastCheckinDay = today;
 }
 
 function scheduleAutoCheckin() {

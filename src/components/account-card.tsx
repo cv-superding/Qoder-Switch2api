@@ -13,7 +13,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { QoderCnMark, QoderMark } from "@/components/product-marks";
 import { cn } from "@/lib/utils";
-import { accountGroupLabel, isInternational, type Account, type QuotaInfo } from "@/lib/types";
+import { accountGroupLabel, isInternational, type Account, type CheckinState, type QuotaInfo } from "@/lib/types";
 
 const AVATAR_TONES = [
   "from-emerald-400 to-teal-600",
@@ -86,12 +86,12 @@ interface Props {
   onCheckin: (a: Account) => void;
   onRefreshCredit: (a: Account) => void;
   onSetGroup: (a: Account, group: string) => void;
-  todayCheckedIn?: boolean;
+  checkinState?: CheckinState;
 }
 
 export function AccountCard({
   account, compact = false, credit, creditLoading, creditError, clientActive, clientBusy, clientLoading,
-  onSwitch, onDelete, onRefresh, onCheckin, onRefreshCredit, onSetGroup, todayCheckedIn,
+  onSwitch, onDelete, onRefresh, onCheckin, onRefreshCredit, onSetGroup, checkinState,
 }: Props) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const intl = isInternational(account);
@@ -153,12 +153,24 @@ export function AccountCard({
           {planTier}
         </Badge>
       ) : null}
-      {todayCheckedIn !== undefined && (
-        <Badge
-          variant={todayCheckedIn ? "success" : "secondary"}
-          className={cn(chipClass, !todayCheckedIn && "text-muted-foreground")}
-        >
-          <CircleCheck /> {todayCheckedIn ? "已签到" : "未签到"}
+      {checkinState === "checked" && (
+        <Badge variant="success" className={chipClass}>
+          <CircleCheck /> 已签到
+        </Badge>
+      )}
+      {checkinState === "claimable" && (
+        <Badge variant="warning" className={chipClass}>
+          <Coins /> 可签到
+        </Badge>
+      )}
+      {checkinState === "none" && (
+        <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>
+          <CircleCheck /> 无签到活动
+        </Badge>
+      )}
+      {checkinState === "error" && (
+        <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")} title="签到状态查询失败">
+          <TriangleAlert /> 签到未知
         </Badge>
       )}
       {account.status === "needs_relogin" && (
@@ -260,9 +272,13 @@ export function AccountCard({
               </div>
               <div className="flex min-w-0 items-center gap-1.5 truncate text-[10.5px] text-muted-foreground">
                 <span className="truncate">{accountIdentity(account)}</span>
-                {todayCheckedIn ? (
+                {checkinState === "checked" ? (
                   <span className="inline-flex shrink-0 items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
                     <CircleCheck className="size-3" />已签
+                  </span>
+                ) : checkinState === "claimable" ? (
+                  <span className="inline-flex shrink-0 items-center gap-0.5 text-amber-600 dark:text-amber-400">
+                    <Coins className="size-3" />可签
                   </span>
                 ) : null}
                 {account.status === "needs_relogin" ? <span className="shrink-0 text-rose-600 dark:text-rose-400">需重登录</span> : null}

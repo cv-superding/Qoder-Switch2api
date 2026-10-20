@@ -224,6 +224,30 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
     }
   });
 
+  router.get("/checkin/status", async (_req, res) => {
+    const results = [];
+    for (const summary of accountManager.list()) {
+      const account = accountManager.get(summary.id);
+      if (!account || (!account.securityOauthToken && !account.pat)) {
+        results.push({ id: summary.id, state: "unavailable" });
+        continue;
+      }
+      const edition = getEdition(account.edition);
+      try {
+        const campaigns = await info.listCampaigns(edition, account);
+        const state = info.findClaimableCheckins(campaigns).length > 0
+          ? "claimable"
+          : info.todayCheckedIn(campaigns)
+            ? "checked"
+            : "none";
+        results.push({ id: summary.id, state });
+      } catch (e) {
+        results.push({ id: summary.id, state: "error", error: e.message });
+      }
+    }
+    res.json({ accounts: results });
+  });
+
   router.post("/accounts/checkin", async (req, res) => {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : accountManager.list().map((a) => a.id);
     const results = [];
@@ -233,27 +257,39 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
       const edition = getEdition(account.edition);
       try {
         const campaigns = await info.listCampaigns(edition, account);
-        if (info.todayCheckedIn(campaigns)) {
-          results.push({ id, name: account.name || account.email, result: "already" });
+        const claimables = info.findClaimableCheckins(campaigns);
+        if (claimables.length === 0) {
+          const checked = info.todayCheckedIn(campaigns);
+          results.push({
+            id,
+            name: account.name || account.email,
+            result: checked ? "already" : "none",
+            error: checked ? undefined : "暂无可领取的签到活动",
+          });
           continue;
         }
-        const claimable = info.findClaimableCheckin(campaigns);
-        if (!claimable) {
-          results.push({ id, name: account.name || account.email, result: "none", error: "暂无可领取的签到活动" });
-          continue;
+        let reward = 0;
+        let anyClaimed = false;
+        let anyReplayed = false;
+        for (const claimable of claimables) {
+          const claim = await info.claimCampaign(edition, account, claimable.id);
+          const credit = Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
+          if (Number.isFinite(credit)) reward += credit;
+          if (claim.replayed) anyReplayed = true;
+          else anyClaimed = true;
         }
-        const claim = await info.claimCampaign(edition, account, claimable.id);
+        const result = anyClaimed ? "success" : anyReplayed ? "already" : "none";
         appendJsonl("checkin.jsonl", {
           accountId: id,
           edition: account.edition,
-          result: claim.replayed ? "replayed" : "success",
-          rewardCredit: claim.rewardCredit ?? claimable.rewardCredit ?? null,
+          result,
+          rewardCredit: reward || null,
         });
         results.push({
           id,
           name: account.name || account.email,
-          result: claim.replayed ? "already" : "success",
-          rewardCredit: claim.rewardCredit ?? claimable.rewardCredit ?? null,
+          result,
+          rewardCredit: reward || null,
         });
       } catch (e) {
         appendJsonl("checkin.jsonl", { accountId: id, edition: account.edition, result: "error", error: e.message });

@@ -35,6 +35,7 @@ pub fn create_api_router(state: Arc<AppState>) -> Router {
         .route("/accounts/{id}/credit", get(get_credit))
         .route("/accounts/import-client", post(import_client_account))
         .route("/accounts/checkin", post(checkin_accounts))
+        .route("/checkin/status", get(get_checkin_status))
         .route("/checkin/logs", get(get_checkin_logs))
         .route("/oauth/start", post(oauth_start))
         .route("/oauth/open-url", post(open_url))
@@ -385,49 +386,105 @@ async fn checkin_accounts(State(state): State<Arc<AppState>>, Json(body): Json<V
         match info::list_campaigns(&edition, &account).await {
             Ok(campaigns) => {
                 if info::today_checked_in(&campaigns) {
-                    results.push(json!({ "id": account.id, "name": name, "result": "already", "rewardCredit": null }));
+                    // 仍有其它可领活动时继续领取，只有全部领完才报 already
+                    if info::find_claimable_checkins(&campaigns).is_empty() {
+                        results.push(json!({ "id": account.id, "name": name, "result": "already", "rewardCredit": null }));
+                        continue;
+                    }
+                }
+                let claimables = info::find_claimable_checkins(&campaigns);
+                if claimables.is_empty() {
+                    results.push(json!({ "id": account.id, "name": name, "result": "none", "error": "暂无可领取的签到活动" }));
                     continue;
                 }
-                match info::find_claimable_checkin(&campaigns) {
-                    Some(claimable) => {
-                        let campaign_id = claimable.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        match info::claim_campaign(&edition, &account, campaign_id).await {
-                            Ok(claim) => {
-                                let replayed = claim.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false);
-                                let reward = claim
-                                    .get("rewardCredit")
-                                    .and_then(|v| v.as_f64())
-                                    .or_else(|| claimable.get("rewardCredit").and_then(|v| v.as_f64()));
-                                append_jsonl(
-                                    "checkin.jsonl",
-                                    &json!({
-                                        "accountId": account.id,
-                                        "edition": account.edition,
-                                        "result": if replayed { "replayed" } else { "success" },
-                                        "rewardCredit": reward
-                                    }),
-                                );
-                                results.push(json!({
-                                    "id": account.id,
-                                    "name": name,
-                                    "result": if replayed { "already" } else { "success" },
-                                    "rewardCredit": reward
-                                }));
-                            }
-                            Err(e) => {
-                                append_jsonl(
-                                    "checkin.jsonl",
-                                    &json!({ "accountId": account.id, "edition": account.edition, "result": "error", "error": e }),
-                                );
-                                results.push(json!({ "id": account.id, "name": name, "result": "error", "error": e }));
+                let mut reward = 0.0_f64;
+                let mut any_claimed = false;
+                let mut any_replayed = false;
+                let mut claim_error: Option<String> = None;
+                for claimable in &claimables {
+                    let campaign_id = claimable.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    match info::claim_campaign(&edition, &account, campaign_id).await {
+                        Ok(claim) => {
+                            let replayed = claim.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false);
+                            reward += claim
+                                .get("rewardCredit")
+                                .and_then(|v| v.as_f64())
+                                .or_else(|| claimable.get("rewardCredit").and_then(|v| v.as_f64()))
+                                .unwrap_or(0.0);
+                            if replayed {
+                                any_replayed = true;
+                            } else {
+                                any_claimed = true;
                             }
                         }
+                        Err(e) => {
+                            claim_error = Some(e);
+                            break;
+                        }
                     }
-                    None => results.push(json!({ "id": account.id, "name": name, "result": "none", "error": "暂无可领取的签到活动" })),
                 }
+                if let Some(e) = claim_error {
+                    append_jsonl(
+                        "checkin.jsonl",
+                        &json!({ "accountId": account.id, "edition": account.edition, "result": "error", "error": e }),
+                    );
+                    results.push(json!({ "id": account.id, "name": name, "result": "error", "error": e }));
+                    continue;
+                }
+                let result = if any_claimed {
+                    "success"
+                } else if any_replayed {
+                    "already"
+                } else {
+                    "none"
+                };
+                let reward = if reward > 0.0 { Some(reward) } else { None };
+                append_jsonl(
+                    "checkin.jsonl",
+                    &json!({
+                        "accountId": account.id,
+                        "edition": account.edition,
+                        "result": result,
+                        "rewardCredit": reward
+                    }),
+                );
+                results.push(json!({
+                    "id": account.id,
+                    "name": name,
+                    "result": result,
+                    "rewardCredit": reward
+                }));
             }
             Err(e) => {
                 results.push(json!({ "id": account.id, "name": name, "result": "error", "error": e }));
+            }
+        }
+    }
+    ok_json(json!({ "accounts": results }))
+}
+
+async fn get_checkin_status(State(state): State<Arc<AppState>>) -> Response {
+    let accounts_snapshot = state.accounts.read().await.accounts.clone();
+    let mut results = Vec::new();
+    for account in accounts_snapshot {
+        if account.security_oauth_token.is_empty() && account.pat.is_empty() {
+            results.push(json!({ "id": account.id, "state": "unavailable" }));
+            continue;
+        }
+        let edition = state.effective_edition(&account.edition).await;
+        match info::list_campaigns(&edition, &account).await {
+            Ok(campaigns) => {
+                let value = if !info::find_claimable_checkins(&campaigns).is_empty() {
+                    "claimable"
+                } else if info::today_checked_in(&campaigns) {
+                    "checked"
+                } else {
+                    "none"
+                };
+                results.push(json!({ "id": account.id, "state": value }));
+            }
+            Err(e) => {
+                results.push(json!({ "id": account.id, "state": "error", "error": e }));
             }
         }
     }

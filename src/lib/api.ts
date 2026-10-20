@@ -1,7 +1,7 @@
 /** API 客户端：与后端 /api/* 对应 */
 
 import type {
-  Account, AppStatus, BackupResult, ChatItem, CheckinResult, ClientInfo, PlanInfo, ProxyConfig, QuotaInfo,
+  Account, AppStatus, BackupResult, ChatItem, CheckinResult, CheckinState, ClientInfo, PlanInfo, ProxyConfig, QuotaInfo,
   Settings, UsageStats, Workspace,
 } from "@/lib/types";
 
@@ -63,6 +63,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(ids ? { ids } : {}),
     }),
+  checkinStatus: () =>
+    request<{ accounts: { id: string; state: CheckinState; error?: string }[] }>("/checkin/status"),
   getCheckinLogs: () => request<{ logs: Record<string, unknown>[] }>("/checkin/logs"),
 
   /* OAuth */

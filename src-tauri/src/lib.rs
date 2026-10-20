@@ -290,18 +290,22 @@ async fn schedule_auto_checkin(state: Arc<AppState>) {
             let now = chrono::Local::now();
             let today = now.format("%Y-%m-%d").to_string();
             if now.hour() as i64 >= hour && last_day != today {
-                last_day = today;
-                run_checkin_all(&state).await;
+                // 有账号失败时不盖章，10 分钟后的下一轮继续重试
+                if run_checkin_all(&state).await {
+                    last_day = today;
+                }
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(10 * 60)).await;
     }
 }
 
-async fn run_checkin_all(state: &Arc<AppState>) {
+/// 返回是否所有账号都处理成功；失败时调用方会在下一轮重试
+async fn run_checkin_all(state: &Arc<AppState>) -> bool {
     use crate::info;
     use crate::store::append_jsonl;
     let accounts_snapshot = state.accounts.read().await.accounts.clone();
+    let mut failed = false;
     for account in accounts_snapshot {
         if account.status == "disabled" {
             continue;
@@ -309,12 +313,14 @@ async fn run_checkin_all(state: &Arc<AppState>) {
         let edition = state.effective_edition(&account.edition).await;
         match info::list_campaigns(&edition, &account).await {
             Ok(campaigns) => {
-                if info::today_checked_in(&campaigns) {
+                let claimables = info::find_claimable_checkins(&campaigns);
+                if claimables.is_empty() {
                     continue;
                 }
-                if let Some(claimable) = info::find_claimable_checkin(&campaigns) {
+                for claimable in &claimables {
                     let id = claimable.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     if let Err(e) = info::claim_campaign(&edition, &account, id).await {
+                        failed = true;
                         append_jsonl(
                             "checkin.jsonl",
                             &serde_json::json!({ "accountId": account.id, "edition": account.edition, "result": "error", "auto": true, "error": e }),
@@ -329,6 +335,7 @@ async fn run_checkin_all(state: &Arc<AppState>) {
                 }
             }
             Err(e) => {
+                failed = true;
                 append_jsonl(
                     "checkin.jsonl",
                     &serde_json::json!({ "accountId": account.id, "edition": account.edition, "result": "error", "auto": true, "error": e }),
@@ -336,6 +343,7 @@ async fn run_checkin_all(state: &Arc<AppState>) {
             }
         }
     }
+    !failed
 }
 
 fn show_main_window<R: tauri::Runtime, M: Manager<R>>(manager: &M) {

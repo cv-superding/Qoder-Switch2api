@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::editions::Edition;
-use crate::paths::{global_storage_db, resolve_client_dir, workspace_storage_dir};
+use crate::paths::{global_storage_db, main_db_path, resolve_client_dir, workspace_storage_dir};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,8 +84,74 @@ fn last_segment(p: &str) -> String {
         .to_string()
 }
 
+/// 新版客户端：main.sqlite 的 chat_sessions 表，按 cwd 聚合工作区
+fn list_new_client_workspaces(dir: &Path) -> Option<Vec<Workspace>> {
+    let db = main_db_path(dir);
+    if !db.exists() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT cwd, COUNT(*) FROM chat_sessions
+             WHERE deleted_at IS NULL AND cwd IS NOT NULL AND cwd <> ''
+             GROUP BY cwd ORDER BY MAX(updated_at) DESC",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .ok()?;
+    let mut out = Vec::new();
+    for (cwd, count) in rows.flatten() {
+        let name = {
+            let segment = last_segment(&cwd);
+            if segment.is_empty() { cwd.clone() } else { segment }
+        };
+        out.push(Workspace {
+            id: cwd.clone(),
+            name,
+            path: cwd,
+            chat_count: count.max(0) as usize,
+        });
+    }
+    Some(out)
+}
+
+fn get_new_client_chats(dir: &Path, workspace_id: &str) -> Option<Vec<ChatItem>> {
+    let db = main_db_path(dir);
+    if !db.exists() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT session_id, title, created_at, updated_at FROM chat_sessions
+             WHERE deleted_at IS NULL AND cwd = ? ORDER BY updated_at DESC",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map([workspace_id], |row| {
+            let session_id: String = row.get(0)?;
+            let title: Option<String> = row.get(1)?;
+            let created: Option<i64> = row.get(2)?;
+            let updated: Option<i64> = row.get(3)?;
+            Ok(ChatItem {
+                id: session_id.clone(),
+                title: title.filter(|t| !t.is_empty()).unwrap_or_else(|| "未命名对话".into()),
+                timestamp: updated.or(created),
+                session_id,
+                contexts: Vec::new(),
+            })
+        })
+        .ok()?;
+    Some(rows.flatten().collect())
+}
+
 pub fn list_workspaces(edition: &Edition, override_dir: &str) -> Vec<Workspace> {
     let dir = resolve_client_dir(edition, override_dir);
+    if let Some(modern) = list_new_client_workspaces(&dir) {
+        return modern;
+    }
     let ws_dir = workspace_storage_dir(&dir);
     if !ws_dir.exists() {
         return Vec::new();
@@ -146,6 +212,9 @@ pub fn list_workspaces(edition: &Edition, override_dir: &str) -> Vec<Workspace> 
 
 pub fn get_chat_history(edition: &Edition, workspace_id: &str, override_dir: &str) -> Result<Vec<ChatItem>, String> {
     let dir = resolve_client_dir(edition, override_dir);
+    if let Some(modern) = get_new_client_chats(&dir, workspace_id) {
+        return Ok(modern);
+    }
     let db = global_storage_db(&dir);
     if !db.exists() {
         return Ok(Vec::new());

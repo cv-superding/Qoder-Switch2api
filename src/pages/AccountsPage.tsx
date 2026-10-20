@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import * as api from "@/lib/api";
-import { accountGroupLabel, type Account, type Edition } from "@/lib/types";
+import { accountGroupLabel, type Account, type CheckinState, type Edition } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useAccountsStore } from "@/stores/accounts";
 
@@ -44,7 +44,7 @@ export default function AccountsPage() {
   const [switchAccount, setSwitchAccount] = useState<Account | null>(null);
   const [importing, setImporting] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
-  const [checkinMap, setCheckinMap] = useState<Record<string, boolean>>({});
+  const [checkinMap, setCheckinMap] = useState<Record<string, CheckinState>>({});
   const [compact, setCompact] = useState<boolean>(() => localStorage.getItem("qoder-switch2api.compact") === "1");
 
   useEffect(() => {
@@ -71,23 +71,36 @@ export default function AccountsPage() {
     void ensureCredits(accounts.map((a) => a.id));
   }, [accounts, ensureCredits]);
 
+  // 实时签到状态以上游活动列表为准；接口异常时退回本地签到记录
   useEffect(() => {
+    if (accounts.length === 0) return;
+    let cancelled = false;
     void api.api
-      .getCheckinLogs()
+      .checkinStatus()
       .then((res) => {
+        if (cancelled) return;
+        const next: Record<string, CheckinState> = {};
+        for (const entry of res.accounts ?? []) next[entry.id] = entry.state;
+        setCheckinMap(next);
+      })
+      .catch(async () => {
+        const res = await api.api.getCheckinLogs().catch(() => null);
+        if (!res || cancelled) return;
         const today = new Date().toDateString();
-        const next: Record<string, boolean> = {};
+        const next: Record<string, CheckinState> = {};
         for (const log of res.logs ?? []) {
           const ts = Number(log.ts);
           const accountId = String(log.accountId ?? "");
           const result = String(log.result ?? "");
           if (!accountId || !ts || new Date(ts).toDateString() !== today) continue;
-          if (result === "success" || result === "replayed" || result === "already") next[accountId] = true;
+          if (result === "success" || result === "replayed" || result === "already") next[accountId] = "checked";
         }
         setCheckinMap(next);
-      })
-      .catch(() => {});
-  }, []);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accounts.length]);
 
   const editionAccounts = useMemo(
     () => accounts.filter((a) => (a.edition === "international") === (editionTab === "international")),
@@ -116,7 +129,7 @@ export default function AccountsPage() {
   const needsAttention = accounts.filter(
     (a) => a.status === "needs_relogin" || a.cooling || (typeof a.tokenExpireAt === "number" && a.tokenExpireAt < Date.now()),
   ).length;
-  const checkedToday = editionAccounts.filter((a) => checkinMap[a.id]).length;
+  const checkedToday = editionAccounts.filter((a) => checkinMap[a.id] === "checked").length;
   const checkinTargets = editionAccounts.filter((a) => a.hasToken || a.hasPat);
 
   /** 按紧急程度排序：需重登录 > 额度将尽 > 冷却中 > 其他 */
@@ -164,7 +177,7 @@ export default function AccountsPage() {
   }
 
   function markCheckedIn(id: string) {
-    setCheckinMap((prev) => ({ ...prev, [id]: true }));
+    setCheckinMap((prev) => ({ ...prev, [id]: "checked" }));
   }
 
   async function onCheckin(a: Account) {
@@ -183,8 +196,10 @@ export default function AccountsPage() {
         markCheckedIn(a.id);
         void refreshCredits([a.id]);
       } else if (entry.result === "none") {
+        setCheckinMap((prev) => ({ ...prev, [a.id]: "none" }));
         toast.info("暂无可签到活动", { description: entry.error || "该账号当前没有可领取的奖励" });
       } else {
+        setCheckinMap((prev) => ({ ...prev, [a.id]: "error" }));
         toast.error("签到失败", { description: entry.error });
       }
     } catch (e) {
@@ -245,9 +260,11 @@ export default function AccountsPage() {
       if (already > 0) parts.push(`${already} 个今日已签`);
       if (none > 0) parts.push(`${none} 个无可领取活动`);
       if (failed > 0) parts.push(`${failed} 个失败`);
-      const next: Record<string, boolean> = {};
+      const next: Record<string, CheckinState> = {};
       for (const entry of res.accounts) {
-        if (entry.result === "success" || entry.result === "already") next[entry.id] = true;
+        if (entry.result === "success" || entry.result === "already") next[entry.id] = "checked";
+        else if (entry.result === "none") next[entry.id] = "none";
+        else next[entry.id] = "error";
       }
       setCheckinMap((prev) => ({ ...prev, ...next }));
       const description = parts.join("，") || "没有需要处理的账号";
@@ -488,7 +505,7 @@ export default function AccountsPage() {
                 clientActive={Boolean(currentUid && a.uid === currentUid)}
                 clientBusy={switchingId !== null}
                 clientLoading={switchingId === a.id}
-                todayCheckedIn={checkinMap[a.id]}
+                checkinState={checkinMap[a.id]}
                 onSwitch={(acc) => {
                   setSwitchAccount(acc);
                   setSwitchingId(acc.id);

@@ -5,7 +5,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { resolveClientDir, workspaceStorageDir, globalStorageDb, dataDir } from "./paths.js";
+import { resolveClientDir, workspaceStorageDir, globalStorageDb, mainDbPath, dataDir } from "./paths.js";
 import { EDITIONS } from "./editions.js";
 
 let sqliteMod = null;
@@ -17,6 +17,72 @@ async function getSqlite() {
     sqliteMod = null;
   }
   return sqliteMod;
+}
+
+/** 新版客户端：main.sqlite 的 chat_sessions 表 */
+async function listNewClientWorkspaces(dir) {
+  const db = mainDbPath(dir);
+  if (!fs.existsSync(db)) return null;
+  const sqlite = await getSqlite();
+  if (!sqlite) return null;
+  try {
+    const database = new sqlite.DatabaseSync(db, { readOnly: true });
+    try {
+      const rows = database
+        .prepare(
+          `SELECT cwd, COUNT(*) AS count, MAX(updated_at) AS updated
+           FROM chat_sessions
+           WHERE deleted_at IS NULL AND cwd IS NOT NULL AND cwd <> ''
+           GROUP BY cwd
+           ORDER BY updated DESC`,
+        )
+        .all();
+      return rows.map((row) => ({
+        id: String(row.cwd),
+        name: lastSegment(String(row.cwd)) || String(row.cwd),
+        path: String(row.cwd),
+        chatCount: Number(row.count) || 0,
+      }));
+    } finally {
+      database.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function getNewClientChats(dir, workspaceId) {
+  const db = mainDbPath(dir);
+  if (!fs.existsSync(db)) return null;
+  const sqlite = await getSqlite();
+  if (!sqlite) return null;
+  try {
+    const database = new sqlite.DatabaseSync(db, { readOnly: true });
+    try {
+      const rows = database
+        .prepare(
+          `SELECT session_id, title, created_at, updated_at
+           FROM chat_sessions
+           WHERE deleted_at IS NULL AND cwd = ?
+           ORDER BY updated_at DESC`,
+        )
+        .all(workspaceId);
+      return rows.map((row) => {
+        const timestamp = Number(row.updated_at ?? row.created_at);
+        return {
+          id: String(row.session_id ?? ""),
+          title: String(row.title || "未命名对话"),
+          timestamp: Number.isFinite(timestamp) ? timestamp : null,
+          sessionId: String(row.session_id ?? ""),
+          contexts: [],
+        };
+      });
+    } finally {
+      database.close();
+    }
+  } catch {
+    return null;
+  }
 }
 
 function decodeWorkspacePath(folderUri) {
@@ -43,6 +109,8 @@ function lastSegment(p) {
 export async function listWorkspaces(editionValue, settings = {}) {
   const edition = EDITIONS[editionValue] || EDITIONS.domestic;
   const dir = resolveClientDir(edition, settings.clientDirOverrides?.[editionValue]);
+  const modern = await listNewClientWorkspaces(dir);
+  if (modern) return modern;
   const wsDir = workspaceStorageDir(dir);
   if (!fs.existsSync(wsDir)) return [];
   const out = [];
@@ -94,6 +162,8 @@ export async function listWorkspaces(editionValue, settings = {}) {
 export async function getChatHistory(editionValue, workspaceId, settings = {}) {
   const edition = EDITIONS[editionValue] || EDITIONS.domestic;
   const dir = resolveClientDir(edition, settings.clientDirOverrides?.[editionValue]);
+  const modernChats = await getNewClientChats(dir, workspaceId);
+  if (modernChats) return modernChats;
   const db = globalStorageDb(dir);
   if (!fs.existsSync(db)) return [];
   const sqlite = await getSqlite();
