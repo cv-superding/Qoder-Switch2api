@@ -8,6 +8,7 @@ interface UpdateState {
   checking: boolean;
   error: string;
   checkedAt: number;
+  lastAttemptAt: number;
   check: (force?: boolean) => Promise<UpdateInfo | null>;
 }
 
@@ -16,10 +17,11 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   checking: false,
   error: "",
   checkedAt: 0,
+  lastAttemptAt: 0,
 
   async check(force = false) {
     if (get().checking) return get().info;
-    set({ checking: true, error: "" });
+    set({ checking: true, error: "", lastAttemptAt: Date.now() });
     try {
       const info = await api.api.checkUpdate(force);
       set({ info, checking: false, checkedAt: Date.now() });

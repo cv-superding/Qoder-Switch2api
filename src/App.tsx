@@ -308,8 +308,22 @@ function UpdateBanner() {
 
   useEffect(() => {
     void check();
-    const timer = window.setInterval(() => void check(), 6 * 60 * 60 * 1000);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(() => void check(), 15 * 60 * 1000);
+    // 切回窗口时补一次检查（5 分钟内已尝试过则跳过）
+    const maybeCheck = () => {
+      const state = useUpdateStore.getState();
+      if (!state.checking && Date.now() - state.lastAttemptAt > 5 * 60 * 1000) void check();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") maybeCheck();
+    };
+    window.addEventListener("focus", maybeCheck);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", maybeCheck);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [check]);
 
   useEffect(() => {

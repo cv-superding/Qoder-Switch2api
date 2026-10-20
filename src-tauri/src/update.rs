@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 const REPO: &str = "cv-superding/Qoder-Switch2api";
-const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const API_URL: &str = "https://api.github.com/repos/cv-superding/Qoder-Switch2api/releases/latest";
+const LATEST_URL: &str = "https://github.com/cv-superding/Qoder-Switch2api/releases/latest";
+// 5 分钟缓存：新版本发布后最多 5 分钟就能被下一次检查看到
+const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 static CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
 
@@ -72,6 +75,42 @@ fn normalize(release: &Value) -> Value {
     })
 }
 
+/// GitHub API 限流 / 不可用时的兜底：releases/latest 跟随重定向，从最终 URL 取 tag
+async fn check_via_html() -> Result<Value, String> {
+    let resp = crate::http::client()
+        .get(LATEST_URL)
+        .header("user-agent", "Qoder-Switch2api-update-check")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Releases 页面请求失败: {}", e))?;
+    let status = resp.status();
+    let final_url = resp.url().as_str().to_string();
+    if !status.is_success() {
+        return Err(format!("Releases 页面 HTTP {}", status.as_u16()));
+    }
+    let tag = final_url
+        .split("/releases/tag/")
+        .nth(1)
+        .map(|rest| rest.split(['?', '#']).next().unwrap_or(""))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "无法从 Releases 页面解析最新版本".to_string())?
+        .to_string();
+    let latest_version = tag.trim_start_matches(['v', 'V']).to_string();
+    let current_version = env!("CARGO_PKG_VERSION");
+    Ok(json!({
+        "currentVersion": current_version,
+        "latestVersion": latest_version,
+        "hasUpdate": !latest_version.is_empty()
+            && compare_versions(&latest_version, current_version) == std::cmp::Ordering::Greater,
+        "releaseUrl": format!("https://github.com/{}/releases/tag/{}", REPO, tag),
+        "downloadUrl": format!("https://github.com/{}/releases/download/{}/qoder-switch2api.exe", REPO, tag),
+        "releaseName": tag,
+        "publishedAt": null,
+        "notes": "",
+    }))
+}
+
 pub async fn check_update(force: bool) -> Result<Value, String> {
     if !force {
         if let Ok(guard) = CACHE.lock() {
@@ -82,25 +121,34 @@ pub async fn check_update(force: bool) -> Result<Value, String> {
             }
         }
     }
-    let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
-    let resp = crate::http::client()
-        .get(&url)
-        .header("accept", "application/vnd.github+json")
-        .header("user-agent", "Qoder-Switch2api-update-check")
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| format!("更新检查失败: {}", e))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("更新检查 HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>()));
+    let api_result = async {
+        let resp = crate::http::client()
+            .get(API_URL)
+            .header("accept", "application/vnd.github+json")
+            .header("user-agent", "Qoder-Switch2api-update-check")
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| format!("更新检查失败: {}", e))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("更新检查 HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>()));
+        }
+        let release: Value = serde_json::from_str(&text).map_err(|e| format!("解析更新信息失败: {}", e))?;
+        let data = normalize(&release);
+        if data.get("latestVersion").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+            return Err("GitHub Releases 响应缺少版本号".into());
+        }
+        Ok(data)
     }
-    let release: Value = serde_json::from_str(&text).map_err(|e| format!("解析更新信息失败: {}", e))?;
-    let data = normalize(&release);
-    if data.get("latestVersion").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-        return Err("GitHub Releases 响应缺少版本号".into());
-    }
+    .await;
+    let data = match api_result {
+        Ok(data) => data,
+        Err(api_error) => check_via_html()
+            .await
+            .map_err(|html_error| format!("{}；Releases 页面兜底也失败：{}", api_error, html_error))?,
+    };
     if let Ok(mut guard) = CACHE.lock() {
         *guard = Some((Instant::now(), data.clone()));
     }
