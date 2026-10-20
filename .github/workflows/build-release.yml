@@ -1,9 +1,14 @@
 name: build-release
 
 on:
-  workflow_dispatch:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 tag（例如 v1.1.0）"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,14 +16,24 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - name: Build frontend
         shell: pwsh
@@ -26,20 +41,46 @@ jobs:
           npm ci
           npm run build
 
-      - name: Build qoder-server.exe
+      - name: Build Windows binaries
         shell: pwsh
         working-directory: src-tauri
-        run: cargo build --release --bin qoder-server
+        run: cargo build --release --bins
 
-      - name: Build desktop app
+      - name: Verify binaries
         shell: pwsh
-        working-directory: src-tauri
-        run: cargo build --release --bin qoder-switch2api
-
-      - name: Upload exe to release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload v1.0.0 src-tauri/target/release/qoder-server.exe --clobber --repo ${{ github.repository }}
-          gh release upload v1.0.0 src-tauri/target/release/qoder-switch2api.exe --clobber --repo ${{ github.repository }}
+          Get-Item src-tauri/target/release/qoder-switch2api.exe, src-tauri/target/release/qoder-server.exe |
+            Format-Table Name, Length
+
+      - name: Create release and upload binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Qoder-Switch2api ${{ env.RELEASE_TAG }}
+          fail_on_unmatched_files: true
+          body: |
+            ## Qoder-Switch2api ${{ env.RELEASE_TAG }}
+
+            界面重做与一批稳定性修复。国内版 Qoder CN / 国际版 Qoder 双版本账号池、OpenAI / Anthropic 兼容反代保持不变。
+
+            ### 下载
+
+            - `qoder-switch2api.exe`：Windows 桌面版，内置本地服务与 WebUI
+            - `qoder-server.exe`：仅启动本地服务，浏览器访问 `http://127.0.0.1:8787`
+
+            可执行文件未签名，首次运行如遇 SmartScreen 提示请选择「更多信息 → 仍要运行」。
+
+            ### 主要更新
+
+            - 全新界面：深色侧栏、浅色工作区、完整暗色模式、移动端抽屉导航
+            - 账号卡片、积分 / Token 统计、反代配置、会话与设置页面重做
+            - 修复备份导入导出不含登录态、默认备份无法导入的问题
+            - 修复 OAuth 无法调用系统浏览器、Token 过期状态不显示、套餐信息不显示
+            - 修复切换账号任务可能被重复触发、反代端口占用状态误报、设置保存导致反代无谓重启
+            - 修复签到 `none` 被误记为已签到、自动签到使用 UTC 日期与错过整点不补签
+            - 统一 Node / Rust 账号库字段格式，并兼容旧数据迁移
+
+            > 账号凭证等同密码。桌面版数据保存在 `~/.qoder-switch/`，本项目不会上传任何账号数据。
+          files: |
+            src-tauri/target/release/qoder-switch2api.exe
+            src-tauri/target/release/qoder-server.exe

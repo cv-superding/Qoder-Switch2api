@@ -28,7 +28,8 @@ Qoder（**国内版 Qoder CN / 国际版 Qoder**）多账号切换 + OpenAI / An
 | 模块 | 说明 |
 |---|---|
 | 双版本账号池 | 国内版（Qoder CN，`*.qoder.com.cn`）与国际版（Qoder，`*.qoder.sh` / `qoder.com`）账号、认证文件、进程、域名完全独立，账号页用标签页分开 |
-| 账号添加 | ① OAuth 设备流扫码登录（PKCE S256，自动打开浏览器 + 轮询授权）② 导入本机客户端登录态 ③ 手动添加 PAT / IDE token ④ 备份文件导入 |
+| 账号添加 | ① OAuth 设备流登录（PKCE S256，自动打开浏览器 + 轮询授权）② 导入本机客户端登录态 ③ 手动添加 PAT / IDE token ④ 备份文件导入 |
+| 备份与迁移 | 导出账号 JSON，可选包含完整登录态；导入后可直接用于反代，也可只迁移账号信息 |
 | 账号切换 | 把目标账号写入 Qoder 客户端登录态（新版 `auth.v1.dat` / 旧版 `state.vscdb`）并重启客户端；切换前自动备份，四步进度反馈 |
 | OpenAI / Anthropic 反代 | 账号池轮转（额度优先 + round-robin）、失败冷却 120s、401/403 自动续期换号、按档位独立监听 |
 | 积分与签到 | Credits 额度 / 套餐 / 到期监控；campaigns 每日签到（批量 + 自动定时，幂等） |
@@ -50,6 +51,9 @@ npm run build      # 生产构建
 npm start          # 单端口托管前端 + API + 反代 → http://127.0.0.1:8787
 ```
 
+也可以直接从 [Releases](https://github.com/cv-superding/Qoder-Switch2api/releases) 下载 Windows
+可执行文件：`qoder-switch2api.exe`（桌面窗口）或 `qoder-server.exe`（仅本地服务）。
+
 ### 方式二：Tauri 桌面模式（Rust 后端，同参考项目 WorkBuddy-Switch2api 形态）
 
 ```bash
@@ -65,15 +69,15 @@ Rust 版内置同一 Web 服务（127.0.0.1:8787，/api/* + 嵌入式前端）�
 
 ### 使用步骤
 
-1. **账号管理** → 「扫码添加」或「导入本机账号」（自动读取本机 Qoder CN 客户端登录态）
+1. **账号管理** → 「OAuth 登录」或「导入本机账号」（自动读取本机 Qoder CN 客户端登录态）
 2. **API 反代** → 打开「启用国内版接口」，监听地址默认 `127.0.0.1:7891`
 3. 客户端接入：`http://127.0.0.1:7891/v1`（OpenAI 兼容）；Codex CLI 用 `/v1/responses`；Claude Code CLI 设 `ANTHROPIC_BASE_URL=http://127.0.0.1:7891`
 
 反代端口可在页面修改；API Key 可留空（任意 Key 可用）或设置后要求 `Authorization: Bearer <key>`。
+监听端口被占用时，反代页会直接显示失败原因，修改端口后保存即可重试。
 
 ## 目录结构
 
-```
 ```
 ├── src-tauri/                # Tauri Rust 壳层（桌面模式）
 │   ├── src/
@@ -146,9 +150,20 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 ## 已知限制
 
 - **客户端切换写路径已做 round-trip 验证，但未做跨账号实测**（会终止用户正在运行的 Qoder 进程，需自行确认后使用）；切换前会自动备份 `auth.v1.dat` / `state.vscdb` 到同目录 `.bak-<时间>`。
-- macOS / Linux 的客户端登录态加密密钥在系统钥匙串中，暂不支持自动读写（可扫码/手动添加账号，反代功能不受影响）。
+- macOS / Linux 的客户端登录态加密密钥在系统钥匙串中，暂不支持自动读写（可 OAuth 登录 / 手动添加账号，反代功能不受影响）。
 - `request_set_id` 字段实测会导致国内版网关挂起，已从请求体中移除（见 docs/API-PROXY.md）。
-- 国际版legacy 流式端点（api3.qoder.sh）按 qoder2api 移植，未持国际版账号实测。
+- 国际版 legacy 流式端点（api3.qoder.sh）按 qoder2api 移植，未持国际版账号实测。
+
+## 更新日志
+
+### v1.1.0
+
+- 重做界面：深色侧栏 + 浅色工作区、完整暗色模式、移动端抽屉导航、统一卡片与图表样式
+- 修复备份导入导出不包含登录态、OAuth 无法打开系统浏览器、Token 过期状态不显示、套餐信息不显示等问题
+- 修复切换账号对话框在父组件刷新时可能重复触发切换任务的问题
+- 修复反代端口占用时状态误报、设置保存时反代被无谓重启、签到 `none` 状态被误记为已签到等问题
+- 统一 Node / Rust 账号库字段命名为 camelCase，并兼容旧数据迁移
+- 修复自动签到使用 UTC 日期、错过整点后不补签的问题
 
 ## 致谢
 

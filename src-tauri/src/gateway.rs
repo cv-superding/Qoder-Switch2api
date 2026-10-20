@@ -46,6 +46,7 @@ async fn auth_middleware(
     if config.api_key.is_empty() {
         return next.run(req).await;
     }
+    let is_messages = req.uri().path().starts_with("/v1/messages");
     let headers = req.headers();
     let header_token = headers
         .get(header::AUTHORIZATION)
@@ -60,6 +61,12 @@ async fn auth_middleware(
         .unwrap_or_default();
     if header_token == config.api_key {
         next.run(req).await
+    } else if is_messages {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "type": "error", "error": { "type": "authentication_error", "message": "API Key 无效" } })),
+        )
+            .into_response()
     } else {
         (
             StatusCode::UNAUTHORIZED,

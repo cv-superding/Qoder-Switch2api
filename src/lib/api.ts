@@ -1,7 +1,8 @@
 /** API 客户端：与后端 /api/* 对应 */
 
 import type {
-  Account, AppStatus, ChatItem, ClientInfo, PlanInfo, ProxyConfig, QuotaInfo, Settings, UsageStats, Workspace,
+  Account, AppStatus, BackupResult, ChatItem, CheckinResult, ClientInfo, PlanInfo, ProxyConfig, QuotaInfo,
+  Settings, UsageStats, Workspace,
 } from "@/lib/types";
 
 const BASE = "/api";
@@ -16,10 +17,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
-    /* ignore */
+    /* 非 JSON 响应（例如 404 HTML） */
   }
   if (!resp.ok) {
-    const message = (json as { error?: string } | null)?.error || `HTTP ${resp.status}`;
+    const fallback = text && !text.trimStart().startsWith("<") ? text.slice(0, 200) : "";
+    const message = (json as { error?: string } | null)?.error || fallback || `HTTP ${resp.status}`;
     throw new Error(message);
   }
   return json as T;
@@ -41,6 +43,12 @@ export const api = {
   updateAccount: (id: string, body: Record<string, unknown>) =>
     request<{ account: Account }>(`/api-account/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteAccount: (id: string) => request<{ ok: boolean }>(`/accounts/${id}`, { method: "DELETE" }),
+  exportAccounts: (body: { includeTokens: boolean; ids?: string[] }) =>
+    request<{
+      app: string; version: string; exportedAt: string; includesTokens: boolean; accounts: Record<string, unknown>[];
+    }>("/accounts/export", { method: "POST", body: JSON.stringify(body) }),
+  importAccounts: (accounts: Record<string, unknown>[]) =>
+    request<BackupResult>("/accounts/import", { method: "POST", body: JSON.stringify({ accounts }) }),
   importClientAccount: (edition: string) =>
     request<{ account: Account; source: string }>("/accounts/import-client", {
       method: "POST",
@@ -51,10 +59,10 @@ export const api = {
   getCredit: (id: string) =>
     request<{ usage: QuotaInfo; plan: PlanInfo | null }>(`/accounts/${id}/credit`),
   checkinAll: (ids?: string[]) =>
-    request<{ accounts: { id: string; name: string; result: string; rewardCredit: number | null; error?: string }[] }>(
-      "/accounts/checkin",
-      { method: "POST", body: JSON.stringify(ids ? { ids } : {}) },
-    ),
+    request<{ accounts: CheckinResult[] }>("/accounts/checkin", {
+      method: "POST",
+      body: JSON.stringify(ids ? { ids } : {}),
+    }),
   getCheckinLogs: () => request<{ logs: Record<string, unknown>[] }>("/checkin/logs"),
 
   /* OAuth */

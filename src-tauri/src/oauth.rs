@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use crate::account::AccountInput;
+use crate::account::{AccountInput, PlanSnapshot};
 use crate::crypto::{machine_id_fallback, uuid};
 use crate::editions::Edition;
 use crate::paths::{machine_id_path, shared_client_cache_dir};
@@ -307,6 +307,30 @@ pub async fn poll_login(login_id: &str) -> LoginOutcome {
         uid
     };
 
+    let plan_tier_name = plan_json
+        .get("plan_tier_name")
+        .or_else(|| plan_json.get("planTierName"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let plan = if plan_tier_name.is_empty() {
+        None
+    } else {
+        Some(PlanSnapshot {
+            user_type: plan_json
+                .get("user_type")
+                .or_else(|| plan_json.get("userType"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            plan_tier_name,
+            end_date: plan_json
+                .get("end_date")
+                .or_else(|| plan_json.get("endDate"))
+                .and_then(json_ms),
+        })
+    };
+
     let account = AccountInput {
         edition: Some(edition.value.clone()),
         label: String::new(),
@@ -367,7 +391,7 @@ pub async fn poll_login(login_id: &str) -> LoginOutcome {
         group: String::new(),
         auth_source: "oauth".into(),
         quota: None,
-        plan: None,
+        plan,
         last_switch_at: None,
     };
 
@@ -376,6 +400,17 @@ pub async fn poll_login(login_id: &str) -> LoginOutcome {
         account: Some(account),
         error: None,
     }
+}
+
+fn json_ms(value: &serde_json::Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(if n < 1_000_000_000_000 { n * 1000 } else { n });
+    }
+    value.as_str().and_then(|raw| {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|date| date.timestamp_millis())
+    })
 }
 
 async fn fetch_json(

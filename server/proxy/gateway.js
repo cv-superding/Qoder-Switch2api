@@ -40,6 +40,9 @@ export function createGateway(edition, getProxyConfig) {
     const header = req.headers.authorization || "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : req.headers["x-api-key"] || "";
     if (token === config.apiKey) return next();
+    if (req.path.startsWith("/v1/messages")) {
+      return res.status(401).json(anthropicError("authentication_error", "API Key 无效", 401));
+    }
     return res.status(401).json(openAiError("invalid_api_key", "API Key 无效", 401));
   });
 
@@ -94,7 +97,7 @@ export function createGateway(edition, getProxyConfig) {
   /* ---------------- Chat Completions ---------------- */
   app.post("/v1/chat/completions", async (req, res) => {
     const started = Date.now();
-    let body = req.body;
+    let body = req.body || {};
     if (typeof body === "string") {
       try {
         body = JSON.parse(body);
@@ -139,9 +142,7 @@ export function createGateway(edition, getProxyConfig) {
         accountId: account.id,
         accountName: account.name || account.email || account.uid,
         model,
-        promptTokens: usage?.promptTokens || estimateTokens(messages),
-        completionTokens: usage?.completionTokens || estimateTokens([{ role: "assistant", content }]),
-        totalTokens: usage?.totalTokens || 0,
+        ...tokenUsage(usage, messages, content),
         durationMs: Date.now() - started,
         success: true,
         api: "chat",
@@ -236,9 +237,7 @@ export function createGateway(edition, getProxyConfig) {
       accountId: account.id,
       accountName: account.name || account.email || account.uid,
       model,
-      promptTokens: usage?.promptTokens || estimateTokens(messages),
-      completionTokens: usage?.completionTokens || estimateTokens([{ role: "assistant", content }]),
-      totalTokens: usage?.totalTokens || 0,
+      ...tokenUsage(usage, messages, content),
       durationMs: Date.now() - started,
       success: true,
       api: "chat",
@@ -248,7 +247,7 @@ export function createGateway(edition, getProxyConfig) {
   /* ---------------- Responses（Codex CLI） ---------------- */
   app.post("/v1/responses", async (req, res) => {
     const started = Date.now();
-    let body = req.body;
+    let body = req.body || {};
     if (typeof body === "string") {
       try {
         body = JSON.parse(body);
@@ -284,9 +283,7 @@ export function createGateway(edition, getProxyConfig) {
       accountId: account.id,
       accountName: account.name || account.email || account.uid,
       model,
-      promptTokens: usage?.promptTokens || estimateTokens(messages),
-      completionTokens: usage?.completionTokens || estimateTokens([{ role: "assistant", content }]),
-      totalTokens: usage?.totalTokens || 0,
+      ...tokenUsage(usage, messages, content),
       durationMs: Date.now() - started,
       success: true,
       api: "responses",
@@ -348,7 +345,7 @@ export function createGateway(edition, getProxyConfig) {
   /* ---------------- Messages（Anthropic / Claude Code） ---------------- */
   app.post("/v1/messages", async (req, res) => {
     const started = Date.now();
-    let body = req.body;
+    let body = req.body || {};
     if (typeof body === "string") {
       try {
         body = JSON.parse(body);
@@ -383,9 +380,7 @@ export function createGateway(edition, getProxyConfig) {
       accountId: account.id,
       accountName: account.name || account.email || account.uid,
       model,
-      promptTokens: usage?.promptTokens || estimateTokens(messages),
-      completionTokens: usage?.completionTokens || estimateTokens([{ role: "assistant", content }]),
-      totalTokens: usage?.totalTokens || 0,
+      ...tokenUsage(usage, messages, content),
       durationMs: Date.now() - started,
       success: true,
       api: "messages",
@@ -512,6 +507,7 @@ async function runWithAccount(editionValue, model, req) {
             messages: req.messages,
             tools: req.tools,
             imageUrls: req.imageUrls,
+            api: req.api,
           })) {
             if (event.type === "error") {
               retryFailed = event.error;
@@ -670,6 +666,17 @@ function estimateTokens(messages) {
     else if (Array.isArray(m.content)) chars += JSON.stringify(m.content).length;
   }
   return Math.ceil(chars / 4);
+}
+
+/** 上游未返回 usage 时使用估算值，且保证 total = prompt + completion */
+function tokenUsage(usage, messages, content) {
+  const promptTokens = usage?.promptTokens || estimateTokens(messages);
+  const completionTokens = usage?.completionTokens || estimateTokens([{ role: "assistant", content }]);
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: usage?.totalTokens || promptTokens + completionTokens,
+  };
 }
 
 function safeJson(raw) {

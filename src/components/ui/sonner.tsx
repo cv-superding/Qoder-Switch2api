@@ -1,10 +1,14 @@
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 
+import { useTheme } from "@/lib/theme";
+
 function Toaster(props: ToasterProps) {
+  const [theme] = useTheme();
   return (
     <Sonner
       className="toaster group"
-      position="top-center"
+      position="bottom-right"
+      theme={theme}
       richColors
       toastOptions={{
         classNames: {

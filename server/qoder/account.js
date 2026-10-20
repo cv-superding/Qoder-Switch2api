@@ -10,6 +10,22 @@ import { EDITIONS } from "../editions.js";
 const COOLDOWN_MS = 120 * 1000; // 失败冷却 120s（同 WorkBuddy-Switch2api）
 const AUTH_ERROR_COOLDOWN_MS = 10 * 60 * 1000; // 鉴权错误冷却 10 分钟
 
+/** 兼容旧版 Rust 写入的 snake_case 账号字段 */
+function normalizeStoredAccount(account) {
+  if (!account || typeof account !== "object") return account;
+  for (const key of Object.keys(account)) {
+    if (!key.includes("_")) continue;
+    const camel = key.replace(/_([a-z])/g, (_, char) => char.toUpperCase());
+    if (!(camel in account)) account[camel] = account[key];
+    delete account[key];
+  }
+  if (account.refreshTokenExpireAt != null && account.refreshTokenExpiresAt == null) {
+    account.refreshTokenExpiresAt = account.refreshTokenExpireAt;
+  }
+  delete account.refreshTokenExpireAt;
+  return account;
+}
+
 /** 统一把到期时间规范为毫秒时间戳（接受 ISO 字符串 / 秒级 / 毫秒级数字） */
 function toMs(raw) {
   if (raw == null || raw === "") return null;
@@ -20,9 +36,20 @@ function toMs(raw) {
   return Number.isNaN(t) ? null : t;
 }
 
+/** 兼容旧数据：账号库可能保存过字符串形式的套餐名 */
+function normalizePlan(raw) {
+  if (!raw) return null;
+  if (typeof raw === "string") return { userType: "", planTierName: raw, endDate: null };
+  return {
+    userType: raw.userType ?? raw.user_type ?? "",
+    planTierName: raw.planTierName ?? raw.plan_tier_name ?? "",
+    endDate: toMs(raw.endDate ?? raw.end_date),
+  };
+}
+
 class AccountManager {
   constructor() {
-    this.accounts = loadEncrypted("accounts.json", []) || [];
+    this.accounts = (loadEncrypted("accounts.json", []) || []).map(normalizeStoredAccount);
     this.cooldowns = new Map(); // accountId -> until
     this.rr = { domestic: 0, international: 0 };
     this.clientCurrent = { domestic: null, international: null }; // 客户端当前登录账号快照 {uid, name, email, at}
@@ -49,7 +76,7 @@ class AccountManager {
   }
 
   publicView(a) {
-    const { securityOauthToken, refreshToken, pat, ...rest } = a;
+    const { securityOauthToken, refreshToken, pat, machineToken, ...rest } = a;
     return {
       ...rest,
       hasToken: Boolean(securityOauthToken),
@@ -64,9 +91,9 @@ class AccountManager {
    * 新增账号。data 需含 edition；登录态字段至少一种
    * （securityOauthToken 或 pat）。同档位同 uid 会覆盖更新。
    */
-  add(data) {
+  add(data, { allowEmpty = false } = {}) {
     const edition = data.edition === "international" ? "international" : "domestic";
-    if (!data.securityOauthToken && !data.pat) {
+    if (!data.securityOauthToken && !data.pat && !allowEmpty) {
       throw new Error("缺少登录凭证：需要 securityOauthToken 或 PAT");
     }
     const normalized = {
@@ -84,21 +111,44 @@ class AccountManager {
       securityOauthToken: data.securityOauthToken || "",
       refreshToken: data.refreshToken || "",
       tokenExpireAt: toMs(data.tokenExpireAt),
-      refreshTokenExpiresAt: toMs(data.refreshTokenExpiresAt),
+      refreshTokenExpiresAt: toMs(data.refreshTokenExpiresAt ?? data.refreshTokenExpireAt),
       pat: data.pat || "",
       machineId: data.machineId || "",
       machineToken: data.machineToken || "",
       machineType: data.machineType || "",
-      group: data.group || "",
+      group: typeof data.group === "string" ? data.group : undefined,
       authSource: data.authSource || "manual",
       quota: data.quota || null,
-      plan: data.plan || null,
+      plan: normalizePlan(data.plan),
     };
 
     if (normalized.uid) {
       const existing = this.accounts.find((a) => a.edition === edition && a.uid === normalized.uid);
       if (existing) {
-        Object.assign(existing, normalized, { updatedAt: Date.now() });
+        const preserved = {
+          quota: existing.quota,
+          plan: existing.plan,
+          group: existing.group,
+          securityOauthToken: existing.securityOauthToken,
+          refreshToken: existing.refreshToken,
+          pat: existing.pat,
+          tokenExpireAt: existing.tokenExpireAt,
+          refreshTokenExpiresAt: existing.refreshTokenExpiresAt,
+        };
+        const hasToken = Boolean(normalized.securityOauthToken || normalized.pat || preserved.securityOauthToken || preserved.pat);
+        Object.assign(existing, normalized, {
+          securityOauthToken: normalized.securityOauthToken || preserved.securityOauthToken,
+          refreshToken: normalized.refreshToken || preserved.refreshToken,
+          pat: normalized.pat || preserved.pat,
+          tokenExpireAt: normalized.tokenExpireAt ?? preserved.tokenExpireAt,
+          refreshTokenExpiresAt: normalized.refreshTokenExpiresAt ?? preserved.refreshTokenExpiresAt,
+          group: normalized.group ?? preserved.group,
+          quota: normalized.quota ?? preserved.quota,
+          plan: normalized.plan ?? preserved.plan,
+          status: hasToken ? "active" : "needs_relogin",
+          lastError: hasToken ? "" : "备份不含登录态，请重新登录",
+          updatedAt: Date.now(),
+        });
         this.save();
         return existing;
       }
@@ -108,8 +158,9 @@ class AccountManager {
       id: randomId("acc"),
       edition,
       ...normalized,
-      status: "active",
-      lastError: "",
+      group: normalized.group ?? "",
+      status: normalized.securityOauthToken || normalized.pat ? "active" : "needs_relogin",
+      lastError: normalized.securityOauthToken || normalized.pat ? "" : "备份不含登录态，请重新登录",
       lastUsedAt: null,
       lastSwitchAt: data.lastSwitchAt != null ? toMs(data.lastSwitchAt) : null,
       createdAt: Date.now(),
@@ -132,12 +183,20 @@ class AccountManager {
     const timeKeys = new Set(["tokenExpireAt", "refreshTokenExpiresAt", "lastUsedAt", "lastSwitchAt"]);
     for (const key of allowed) {
       if (key in patch) {
-        account[key] = timeKeys.has(key) ? toMs(patch[key]) : patch[key];
+        account[key] = timeKeys.has(key) ? toMs(patch[key]) : key === "plan" ? normalizePlan(patch[key]) : patch[key];
       }
     }
     account.updatedAt = Date.now();
     this.save();
     return account;
+  }
+
+  /** 导出账号（默认脱敏；includeTokens 时包含完整登录态，仅用于本机迁移） */
+  exportList({ includeTokens = false, ids = null } = {}) {
+    const set = Array.isArray(ids) && ids.length > 0 ? new Set(ids) : null;
+    return this.accounts
+      .filter((a) => !set || set.has(a.id))
+      .map((a) => (includeTokens ? { ...a, cooling: this.isCooling(a.id) } : this.publicView(a)));
   }
 
   remove(id) {
@@ -194,8 +253,11 @@ class AccountManager {
   markSuccess(id) {
     const account = this.get(id);
     if (account) {
+      const changed = Boolean(account.lastError) || account.status === "needs_relogin";
       account.lastError = "";
+      account.status = "active";
       account.updatedAt = Date.now();
+      if (changed) this.save();
     }
     this.cooldowns.delete(id);
   }

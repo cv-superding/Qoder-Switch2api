@@ -75,15 +75,52 @@ fn proxy_servers() -> &'static Mutex<HashMap<String, Arc<tokio::task::JoinHandle
     SERVERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn proxy_signatures() -> &'static Mutex<HashMap<String, String>> {
+    static SIGNATURES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    SIGNATURES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn proxy_errors() -> &'static Mutex<HashMap<String, String>> {
+    static ERRORS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    ERRORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub fn proxy_running(edition: &str) -> bool {
     let servers = proxy_servers().lock().unwrap_or_else(|e| e.into_inner());
     servers.contains_key(edition)
 }
 
+pub fn proxy_error(edition: &str) -> String {
+    proxy_errors()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(edition)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn stop_proxy(value: &str) {
+    if let Some(handle) = proxy_servers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(value)
+    {
+        handle.abort();
+        println!("[proxy:{}] 已停止", value);
+    }
+    proxy_signatures()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(value);
+    proxy_errors()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(value);
+}
+
 /// 按设置启动 / 停止反代服务器
 pub async fn refresh_proxy_servers(state: &Arc<AppState>) {
-    let settings = state.settings.read().await;
-    let mut servers = proxy_servers().lock().unwrap_or_else(|e| e.into_inner());
+    let settings = state.settings.read().await.clone();
     for value in crate::editions::EDITION_LIST {
         let config: ProxyConfig = settings
             .proxy
@@ -93,30 +130,70 @@ pub async fn refresh_proxy_servers(state: &Arc<AppState>) {
                 listen: if value == "international" { "127.0.0.1:7892".into() } else { "127.0.0.1:7891".into() },
                 ..Default::default()
             });
-        let running = servers.contains_key(value);
-        if config.enabled && !running {
+        let signature = format!("{}|{}", config.enabled, config.listen);
+        let running = proxy_servers()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(value);
+        let unchanged = proxy_signatures()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(value)
+            .map(|current| current == &signature)
+            .unwrap_or(false);
+        if config.enabled {
+            if running && unchanged {
+                continue;
+            }
+            if running {
+                stop_proxy(value);
+            }
             let (host, port) = parse_listen(&config.listen);
+            let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
+                Ok(listener) => listener,
+                Err(e) => {
+                    let message = format!("{}:{} 监听失败：{}", host, port, e);
+                    eprintln!("[proxy:{}] {}", value, message);
+                    proxy_signatures()
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .remove(value);
+                    proxy_errors()
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .insert(value.to_string(), message);
+                    continue;
+                }
+            };
+            proxy_errors()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(value);
+            proxy_signatures()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(value.to_string(), signature);
             let app = create_gateway(value, state.clone());
             let edition_value = value.to_string();
+            let log_host = host.clone();
             let handle = tokio::spawn(async move {
-                let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        eprintln!("[proxy:{}] 监听失败 {}:{} — {}", edition_value, host, port, e);
-                        return;
-                    }
-                };
-                println!("[proxy:{}] 反代已启动 → http://{}:{}/v1", edition_value, host, port);
+                println!("[proxy:{}] 反代已启动 → http://{}:{}/v1", edition_value, log_host, port);
                 if let Err(e) = axum::serve(listener, app).await {
                     eprintln!("[proxy:{}] 服务退出: {}", edition_value, e);
                 }
             });
-            servers.insert(value.to_string(), Arc::new(handle));
-        } else if !config.enabled && running {
-            if let Some(handle) = servers.remove(value) {
-                handle.abort();
+            proxy_servers()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(value.to_string(), Arc::new(handle));
+        } else {
+            if running {
+                stop_proxy(value);
             }
-            println!("[proxy:{}] 已停止", value);
+            proxy_errors()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(value);
         }
     }
 }
@@ -189,8 +266,9 @@ async fn static_handler(uri: Uri) -> Response {
     (StatusCode::NOT_FOUND, "前端尚未构建（npm run build）").into_response()
 }
 
-/// 自动签到调度
+/// 自动签到调度（本地时区；启动时若已过执行时间会当天补签）
 async fn schedule_auto_checkin(state: Arc<AppState>) {
+    use chrono::Timelike;
     let mut last_day = String::new();
     loop {
         let (enabled, hour) = {
@@ -198,39 +276,15 @@ async fn schedule_auto_checkin(state: Arc<AppState>) {
             (settings.auto_checkin.enabled, settings.auto_checkin.hour)
         };
         if enabled {
-            let now = chrono_lite_now();
-            let today = format!("{:04}-{:02}-{:02}", now.0, now.1, now.2);
-            if now.3 as i64 == hour && last_day != today {
+            let now = chrono::Local::now();
+            let today = now.format("%Y-%m-%d").to_string();
+            if now.hour() as i64 >= hour && last_day != today {
                 last_day = today;
                 run_checkin_all(&state).await;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(10 * 60)).await;
     }
-}
-
-fn chrono_lite_now() -> (i64, i64, i64, i64) {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0) as i64;
-    let days = secs / 86400;
-    let rem = secs % 86400;
-    let (y, m, d) = civil_from_days(days);
-    (y, m, d, rem / 3600)
-}
-
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 async fn run_checkin_all(state: &Arc<AppState>) {

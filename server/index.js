@@ -10,7 +10,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadJson, saveJson, appendJsonl } from "./store.js";
+import { loadJson, appendJsonl } from "./store.js";
 import { ensureDataDir } from "./paths.js";
 import { EDITIONS } from "./editions.js";
 import { createApiRouter } from "./routes/api.js";
@@ -78,10 +78,15 @@ function effectiveEdition(value) {
 /* ---------------- 反代服务器管理 ---------------- */
 
 const proxyServers = new Map(); // edition -> http.Server
+const proxyRuntime = new Map(); // edition -> { signature, error }
 
 function parseListen(listen) {
   const [host, port] = String(listen || "127.0.0.1:7891").split(":");
   return { host: host || "127.0.0.1", port: Number(port) || 7891 };
+}
+
+function proxySignature(config) {
+  return JSON.stringify({ enabled: Boolean(config?.enabled), listen: config?.listen || "" });
 }
 
 function startProxy(editionValue) {
@@ -89,17 +94,22 @@ function startProxy(editionValue) {
   const config = settings.proxy[editionValue];
   if (!config?.enabled) return;
   const { host, port } = parseListen(config.listen);
+  const runtime = { signature: proxySignature(config), error: "" };
+  proxyRuntime.set(editionValue, runtime);
   const app = createGateway(effectiveEdition(editionValue), (v) => settings.proxy[v]);
   const server = http.createServer(app);
   server.on("error", (err) => {
-    console.error(`[proxy:${editionValue}] 监听失败 ${host}:${port} — ${err.message}`);
+    runtime.error = `${host}:${port} 监听失败：${err.message}`;
+    proxyServers.delete(editionValue);
+    console.error(`[proxy:${editionValue}] ${runtime.error}`);
     appendJsonl("events.jsonl", { event: "proxy-listen-error", edition: editionValue, listen: config.listen, error: err.message });
   });
   server.listen(port, host, () => {
+    runtime.error = "";
+    proxyServers.set(editionValue, server);
     console.log(`[proxy:${editionValue}] ${EDITIONS[editionValue].label} 反代已启动 → http://${host}:${port}/v1`);
     appendJsonl("events.jsonl", { event: "proxy-start", edition: editionValue, listen: config.listen });
   });
-  proxyServers.set(editionValue, server);
 }
 
 function stopProxy(editionValue) {
@@ -108,6 +118,7 @@ function stopProxy(editionValue) {
     server.close();
     proxyServers.delete(editionValue);
   }
+  proxyRuntime.delete(editionValue);
 }
 
 function refreshProxyServers(nextSettings) {
@@ -116,28 +127,46 @@ function refreshProxyServers(nextSettings) {
     setSwitcherSettings(settings);
   }
   for (const value of ["domestic", "international"]) {
-    if (settings.proxy[value]?.enabled) startProxy(value);
-    else stopProxy(value);
+    const config = settings.proxy[value] || {};
+    const server = proxyServers.get(value);
+    const runtime = proxyRuntime.get(value);
+    if (config.enabled) {
+      // 配置未变化且正在监听时不做任何事，避免每次保存设置都重启反代
+      if (server?.listening && runtime?.signature === proxySignature(config)) continue;
+      startProxy(value);
+    } else {
+      stopProxy(value);
+    }
   }
 }
 
 function proxyStatus(editionValue) {
   const config = settings.proxy[editionValue] || {};
+  const server = proxyServers.get(editionValue);
   return {
     enabled: Boolean(config.enabled),
     listen: config.listen,
-    running: proxyServers.has(editionValue),
+    running: Boolean(server?.listening),
     hasApiKey: Boolean(config.apiKey),
     extraModels: config.extraModels || [],
+    accountGroup: config.accountGroup || "proxy",
+    error: proxyRuntime.get(editionValue)?.error || "",
   };
 }
 
 /* ---------------- 自动签到 ---------------- */
 
 let lastCheckinDay = "";
+
+function localDayKey(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 async function runAutoCheckin(force = false) {
   if (!settings.autoCheckin?.enabled && !force) return;
-  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  if (!force && now.getHours() < (settings.autoCheckin?.hour ?? 9)) return;
+  const today = localDayKey(now);
   if (!force && lastCheckinDay === today) return;
   lastCheckinDay = today;
   const accounts = accountManager.list().filter((a) => a.status !== "disabled");
@@ -171,10 +200,8 @@ async function runAutoCheckin(force = false) {
 }
 
 function scheduleAutoCheckin() {
-  setInterval(() => {
-    const now = new Date();
-    if (now.getHours() === (settings.autoCheckin?.hour ?? 9)) void runAutoCheckin();
-  }, 30 * 60 * 1000);
+  // 每 10 分钟检查一次；错过整点或程序稍晚启动也能在当天补签
+  setInterval(() => void runAutoCheckin(), 10 * 60 * 1000);
 }
 
 /* ---------------- Web 服务 ---------------- */
@@ -210,12 +237,7 @@ app.listen(WEB_PORT, "127.0.0.1", () => {
   console.log(`Qoder-Switch2api WebUI → http://127.0.0.1:${WEB_PORT}`);
   refreshProxyServers();
   scheduleAutoCheckin();
-  // 启动时补一次签到（距上次超过 20 小时）
-  const last = loadJson("checkin-state.json", {}) || {};
-  if (!last.at || Date.now() - last.at > 20 * 3600 * 1000) {
-    saveJson("checkin-state.json", { at: Date.now() });
-    void runAutoCheckin();
-  }
+  void runAutoCheckin();
 });
 
 /* 生效 edition 暴露给 api 路由（OAuth / 信息查询用） */

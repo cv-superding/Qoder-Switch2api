@@ -58,7 +58,7 @@ export function readMachineInfo(clientDir) {
   return info;
 }
 
-/** 发起登录，返回验证 URL（前端展示 + 供用户点击/扫码） */
+/** 发起登录，返回验证 URL（前端展示并打开系统浏览器） */
 export function startLogin(edition, clientDir) {
   const nonce = uuid().replace(/-/g, "");
   const verifier = pkceVerifier();
@@ -164,6 +164,7 @@ export async function pollLogin(loginId) {
   const info = userInfo?.json || {};
   const plan = userPlan?.json || {};
   const uid = status.id || token.user_id || info.id || "";
+  const planTierName = plan.plan_tier_name || plan.planTierName || "";
   const account = {
     edition: edition.value,
     uid,
@@ -178,11 +179,17 @@ export async function pollLogin(loginId) {
     securityOauthToken: token.token,
     refreshToken: token.refresh_token || "",
     tokenExpireAt: normalizeExpire(token.expires_at),
-    refreshTokenExpireAt: normalizeExpire(token.refresh_token_expires_at),
+    refreshTokenExpiresAt: normalizeExpire(token.refresh_token_expires_at),
     machineId: machine.machineId,
     machineToken: machine.machineToken,
     machineType: machine.machineType,
-    plan: plan.plan_tier_name || plan.planTierName || "",
+    plan: planTierName
+      ? {
+          userType: plan.user_type || plan.userType || "",
+          planTierName,
+          endDate: normalizeExpire(plan.end_date ?? plan.endDate),
+        }
+      : null,
     quota: typeof status.quota === "number" ? status.quota : null,
     isQuotaExceeded: Boolean(status.isQuotaExceeded),
     authSource: "oauth",

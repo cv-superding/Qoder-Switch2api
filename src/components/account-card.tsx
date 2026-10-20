@@ -16,12 +16,12 @@ import { cn } from "@/lib/utils";
 import { accountGroupLabel, isInternational, type Account, type QuotaInfo } from "@/lib/types";
 
 const AVATAR_TONES = [
-  "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
-  "bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300",
-  "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300",
-  "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
-  "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300",
-  "bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300",
+  "from-emerald-400 to-teal-600",
+  "from-sky-400 to-blue-600",
+  "from-amber-400 to-orange-600",
+  "from-rose-400 to-pink-600",
+  "from-teal-400 to-cyan-600",
+  "from-lime-400 to-emerald-600",
 ] as const;
 
 function avatarTone(name: string) {
@@ -69,14 +69,14 @@ function accountIdentity(account: Account): string {
   return account.uid ? `UID · ${account.uid}` : `ID · ${account.id}`;
 }
 
-const chipClass = "rounded-md px-1.5 py-0 text-[11px] font-medium";
+const chipClass = "h-[22px] px-2 text-[10.5px]";
 
 interface Props {
   account: Account;
   compact?: boolean;
   credit?: QuotaInfo;
   creditLoading?: boolean;
-  creditPriority?: boolean;
+  creditError?: string;
   clientActive?: boolean;
   clientBusy?: boolean;
   clientLoading?: boolean;
@@ -84,13 +84,14 @@ interface Props {
   onDelete: (a: Account) => void;
   onRefresh: (a: Account) => void;
   onCheckin: (a: Account) => void;
+  onRefreshCredit: (a: Account) => void;
   onSetGroup: (a: Account, group: string) => void;
   todayCheckedIn?: boolean;
 }
 
 export function AccountCard({
-  account, compact = false, credit, creditLoading, creditPriority, clientActive, clientBusy, clientLoading,
-  onSwitch, onDelete, onRefresh, onCheckin, onSetGroup, todayCheckedIn,
+  account, compact = false, credit, creditLoading, creditError, clientActive, clientBusy, clientLoading,
+  onSwitch, onDelete, onRefresh, onCheckin, onRefreshCredit, onSetGroup, todayCheckedIn,
 }: Props) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const intl = isInternational(account);
@@ -101,38 +102,45 @@ export function AccountCard({
   const total = credit?.quota?.total ?? quota?.total ?? null;
   const unit = credit?.quota?.unit || quota?.unit || "credits";
   const expiresAt = credit?.expiresAt ?? quota?.expiresAt ?? null;
-  const updatedAt = credit?.quota ? undefined : quota?.updatedAt;
+  const updatedAt = quota?.updatedAt;
   const expired = typeof expiresAt === "number" && expiresAt < Date.now();
   const expiringSoon = typeof expiresAt === "number" && !expired && expiresAt - Date.now() < 7 * 86400000;
+  const planTier = account.plan?.planTierName ?? "";
 
-  // 百分比：优先由 remaining/total 计算；上游 percentage 可能是 0~1 小数，归一化到 0~100
   let percent: number | null = null;
   if (remaining != null && total) {
     percent = (remaining / total) * 100;
   } else if (typeof credit?.quota?.percentage === "number") {
     percent = credit.quota.percentage <= 1 ? credit.quota.percentage * 100 : credit.quota.percentage;
   }
+  const clampedPercent = percent == null ? 0 : Math.min(100, Math.max(0, percent));
 
-  const tokenExpired =
-    typeof account.tokenExpireAt === "number" && account.tokenExpireAt < Date.now();
+  const tokenExpired = typeof account.tokenExpireAt === "number" && account.tokenExpireAt < Date.now();
+  const urgentChip =
+    account.status === "needs_relogin" || tokenExpired ? "warning" : account.cooling ? "secondary" : null;
 
   const statusChips = (
     <>
       {intl && (
-        <Badge variant="secondary" className={cn(chipClass, "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300")}>
+        <Badge variant="secondary" className={cn(chipClass, "bg-amber-500/10 text-amber-700 dark:text-amber-400")}>
           国际版
         </Badge>
       )}
       {(account.group === "desktop" || account.group === "proxy") && (
-        <Badge
-          variant="secondary"
-          className={cn(chipClass, account.group === "proxy" ? "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300" : "bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300")}
-        >
+        <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>
           {accountGroupLabel(account.group)}
         </Badge>
       )}
+      {planTier ? (
+        <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>
+          {planTier}
+        </Badge>
+      ) : null}
       {todayCheckedIn !== undefined && (
-        <Badge variant={todayCheckedIn ? "success" : "secondary"} className={cn(chipClass, !todayCheckedIn && "text-muted-foreground")}>
+        <Badge
+          variant={todayCheckedIn ? "success" : "secondary"}
+          className={cn(chipClass, !todayCheckedIn && "text-muted-foreground")}
+        >
           <CircleCheck /> {todayCheckedIn ? "已签到" : "未签到"}
         </Badge>
       )}
@@ -144,227 +152,342 @@ export function AccountCard({
       {account.status !== "needs_relogin" && tokenExpired && (
         <Badge variant="warning" className={chipClass}>Token 已过期</Badge>
       )}
-      {account.cooling && <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>冷却中</Badge>}
-      {creditPriority && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Badge variant="warning" className={cn(chipClass, "px-1")} aria-label="建议优先">
-              <Sparkles className="size-3.5" />
-            </Badge>
-          </TooltipTrigger>
-          <TooltipContent side="top">建议优先使用</TooltipContent>
-        </Tooltip>
+      {account.cooling && !urgentChip && (
+        <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>冷却中</Badge>
       )}
       {account.hasPat && <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>PAT</Badge>}
     </>
   );
 
-  return (
-    <TooltipProvider>
-      <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,.025),0_10px_28px_rgba(15,23,42,.035)] transition-shadow hover:shadow-[0_2px_4px_rgba(15,23,42,.04),0_14px_34px_rgba(15,23,42,.055)]">
-        <header
+  const moreMenu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn("rounded-lg text-muted-foreground hover:text-foreground", compact ? "size-7" : "size-8")}
+          aria-label={`管理账号 ${displayName}`}
+          title="更多账号操作"
+        >
+          <Ellipsis />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-44">
+        <DropdownMenuLabel className="truncate">{displayName}</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => onRefresh(account)}>
+          <RefreshCw />刷新 Token
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onCheckin(account)}>
+          <CircleCheck />手动签到
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>加入分组</DropdownMenuLabel>
+        {(["proxy", "desktop", ""] as const).map((g) => (
+          <DropdownMenuItem key={g || "ungrouped"} onSelect={() => onSetGroup(account, g)}>
+            {(account.group ?? "") === g ? <Check /> : <span className="inline-block size-4" />}
+            {accountGroupLabel(g)}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          className="text-destructive focus:bg-destructive/5 focus:text-destructive"
+          onSelect={() => setDeleteOpen(true)}
+        >
+          <Trash2 />删除账号
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  const quotaError = creditError ? (
+    <div className="mt-2 flex items-center gap-1.5 text-[11px] text-destructive">
+      <TriangleAlert className="size-3.5 shrink-0" />
+      <span className="min-w-0 flex-1 truncate" title={creditError}>额度查询失败：{creditError}</span>
+      <button
+        type="button"
+        onClick={() => onRefreshCredit(account)}
+        className="shrink-0 rounded-md px-1.5 py-0.5 font-medium underline-offset-2 hover:underline"
+      >
+        重试
+      </button>
+    </div>
+  ) : null;
+
+  if (compact) {
+    return (
+      <TooltipProvider>
+        <article
           className={cn(
-            "relative flex items-center border-b border-border",
-            compact ? "min-h-[52px] px-3.5 py-1.5" : "min-h-[104px] px-5 py-3",
-            clientActive ? "bg-primary/5" : "bg-muted/30",
+            "group relative flex flex-col overflow-hidden rounded-xl border bg-card px-3.5 py-3 transition-colors",
+            clientActive ? "border-primary/30 bg-primary/[0.025]" : "border-border/80 hover:border-border",
           )}
         >
-          <div className="pointer-events-none absolute inset-0 overflow-hidden">
-            <div
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span
               className={cn(
-                "absolute -right-10 -top-16 rounded-full blur-2xl",
-                compact ? "size-20" : "size-24",
-                clientActive ? "bg-primary/15" : "bg-muted/30",
+                "relative flex size-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br text-[11px] font-semibold text-white",
+                avatarTone(displayName),
               )}
+            >
+              {displayName.charAt(0).toUpperCase()}
+              {clientActive ? (
+                <span className="absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full border-2 border-card bg-primary text-primary-foreground">
+                  <Check className="size-2" strokeWidth={3.5} />
+                </span>
+              ) : null}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <h3 className="truncate text-[12.5px] font-semibold leading-5" title={displayName}>{displayName}</h3>
+                {intl ? <QoderMark size={12} className="shrink-0 opacity-60" /> : null}
+              </div>
+              <div className="flex min-w-0 items-center gap-1.5 truncate text-[10.5px] text-muted-foreground">
+                <span className="truncate">{accountIdentity(account)}</span>
+                {todayCheckedIn ? (
+                  <span className="inline-flex shrink-0 items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
+                    <CircleCheck className="size-3" />已签
+                  </span>
+                ) : null}
+                {account.status === "needs_relogin" ? <span className="shrink-0 text-rose-600 dark:text-rose-400">需重登录</span> : null}
+                {account.cooling ? <span className="shrink-0 text-amber-600 dark:text-amber-400">冷却中</span> : null}
+              </div>
+            </div>
+            <div className="shrink-0 text-right">
+              {creditLoading ? (
+                <Loader2 className="ml-auto size-3.5 animate-spin text-muted-foreground" />
+              ) : (
+                <>
+                  <div className="font-display text-[15px] font-semibold leading-none tabular-nums">
+                    {formatCredits(remaining)}
+                  </div>
+                  <div className="mt-0.5 text-[9.5px] text-muted-foreground">剩余 credits</div>
+                </>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-0.5">
+              {!clientActive ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 rounded-lg"
+                      disabled={clientBusy}
+                      onClick={() => onSwitch(account)}
+                      aria-label="切换到客户端"
+                    >
+                      <ArrowLeftRight className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">切换到 Qoder 客户端</TooltipContent>
+                </Tooltip>
+              ) : null}
+              {moreMenu}
+            </div>
+          </div>
+          <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
+            <div
+              className={cn("h-full rounded-full transition-[width]", expired ? "bg-destructive/60" : expiringSoon ? "bg-amber-500" : "bg-primary")}
+              style={{ width: `${clampedPercent > 0 ? Math.max(2, clampedPercent) : 0}%` }}
             />
-            <div className={cn("absolute top-[63%] -translate-y-1/2 opacity-[0.075] saturate-50 grayscale-[10%]", "right-5 rotate-[7deg]")}>
-              <Mark size={compact ? 40 : 56} />
-            </div>
           </div>
+          {quotaError}
+        </article>
 
-          <div className={cn("absolute z-20", compact ? "right-2.5 top-1/2 -translate-y-1/2" : "right-3.5 top-3.5")}>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className={cn("rounded-lg text-muted-foreground hover:text-foreground", compact ? "size-7" : "size-8")} aria-label={`管理账号 ${displayName}`} title="更多账号操作">
-                  <Ellipsis />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-40">
-                <DropdownMenuItem onSelect={() => onRefresh(account)}>
-                  <RefreshCw />刷新 Token
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onCheckin(account)}>
-                  <CircleCheck />手动签到
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                {(["desktop", "proxy", ""] as const).map((g) => (
-                  <DropdownMenuItem key={g || "ungrouped"} onSelect={() => onSetGroup(account, g)}>
-                    {(account.group ?? "") === g ? <Check /> : <span className="inline-block size-4" />}
-                    分组：{accountGroupLabel(g)}
-                  </DropdownMenuItem>
-                ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem className="text-destructive focus:bg-destructive/5 focus:text-destructive" onSelect={() => setDeleteOpen(true)}>
-                  <Trash2 />删除账号
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+        <DeleteDialog open={deleteOpen} onOpenChange={setDeleteOpen} name={displayName} onConfirm={() => onDelete(account)} />
+      </TooltipProvider>
+    );
+  }
+
+  return (
+    <TooltipProvider>
+      <article
+        className={cn(
+          "card-lift relative flex h-full min-w-0 flex-col overflow-hidden rounded-2xl border bg-card shadow-[0_1px_2px_oklch(0.2_0.02_255/4%)]",
+          clientActive ? "border-primary/30" : "border-border/80",
+        )}
+      >
+        {clientActive ? <div className="absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-primary/20 via-primary to-primary/20" /> : null}
+
+        <header className="relative overflow-hidden px-5 pb-3.5 pt-4">
+          <div className="pointer-events-none absolute -right-8 -top-12 size-32 rounded-full bg-primary/[0.035] blur-2xl" />
+          <div className="relative flex items-start gap-3">
+            <span
+              className={cn(
+                "relative flex size-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br text-[15px] font-semibold text-white shadow-[inset_0_1px_0_oklch(1_0_0/25%)] ring-[3px] ring-card",
+                avatarTone(displayName),
+              )}
+            >
+              {displayName.charAt(0).toUpperCase()}
+              {clientActive ? (
+                <span className="absolute -bottom-0.5 -right-0.5 flex size-4 items-center justify-center rounded-full border-2 border-card bg-primary text-primary-foreground">
+                  <Check className="size-2.5" strokeWidth={3.5} />
+                </span>
+              ) : null}
+            </span>
+            <div className="min-w-0 flex-1 pt-0.5">
+              <h3 className="truncate text-[14px] font-semibold leading-5 tracking-[-0.01em]" title={displayName}>
+                {displayName}
+              </h3>
+              <p className="mt-0.5 truncate text-[11.5px] leading-5 text-muted-foreground" title={account.email || account.uid || account.id}>
+                {accountIdentity(account)}
+              </p>
+            </div>
+            <div className="relative z-10 -mr-1 -mt-0.5 shrink-0">{moreMenu}</div>
           </div>
-
-          {compact ? (
-            <div className="relative z-10 flex w-full min-w-0 items-center gap-2 pr-10">
-              <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-5" title={displayName}>{displayName}</h3>
-              <div className="hidden shrink-0 items-center gap-1 min-[420px]:flex">{statusChips}</div>
-              <div className="ml-auto flex shrink-0 items-center gap-1">
-                {clientActive ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="relative inline-flex size-7 items-center justify-center rounded-lg border border-primary/25 bg-primary/10 text-primary">
-                        <Mark size={15} />
-                        <span className="absolute -right-1 -top-1 flex size-3.5 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                          <Check className="size-2.5" strokeWidth={3} />
-                        </span>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">Qoder 客户端当前账号</TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button variant="outline" size="icon" className="size-7 rounded-lg" disabled={clientBusy} onClick={() => onSwitch(account)} aria-label="设为 Qoder 客户端当前账号">
-                        <Mark size={15} />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="space-y-0.5">
-                      <div>设为 Qoder 客户端当前账号（会重启客户端）</div>
-                      <div className="text-muted-foreground">上次设为当前：{formatSwitchedAt(account.lastSwitchAt)}</div>
-                    </TooltipContent>
-                  </Tooltip>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className={cn("relative z-10 flex w-full min-w-0 items-center gap-3", "pr-10")}>
-              <div className={cn("flex size-12 shrink-0 items-center justify-center rounded-full text-base font-semibold ring-4 ring-white/65 dark:ring-white/10", avatarTone(displayName))}>{displayName.charAt(0).toUpperCase()}</div>
-              <div className="min-w-0 flex-1">
-                <h3 className="truncate text-sm font-semibold leading-5" title={displayName}>{displayName}</h3>
-                <p className="mt-0.5 truncate text-xs leading-5 text-muted-foreground" title={account.email || account.uid || account.id}>{accountIdentity(account)}</p>
-                <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5">{statusChips}</div>
-              </div>
-            </div>
-          )}
+          <div className="relative mt-2.5 flex min-w-0 flex-wrap items-center gap-1.5">{statusChips}</div>
         </header>
 
-        <section className={cn("flex min-w-0 flex-1 flex-col", compact ? "px-3.5 pb-3 pt-3" : "px-5 pb-4 pt-4")}>
+        <section className="flex min-w-0 flex flex-1 flex-col px-5 pb-4">
           {creditLoading ? (
-            <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />额度查询中…</div>
+            <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />额度查询中
+            </div>
           ) : remaining == null ? (
-            <div className="py-3 text-sm text-muted-foreground">等待额度数据…</div>
+            <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+              <Sparkles className="size-3.5" />
+              {creditError ? "额度暂不可用" : "等待额度数据"}
+            </div>
           ) : (
             <>
-              <div className="flex items-baseline gap-x-3 gap-y-1">
-                <span className="flex items-center gap-1.5">
-                  <Sparkles className="size-4 shrink-0 stroke-[1.75] text-muted-foreground" aria-hidden="true" />
-                  <strong
-                    className={cn("font-semibold leading-none tabular-nums tracking-[-0.025em]", compact ? "text-[20px]" : "text-[22px]")}
-                    style={{ fontFamily: '"Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif' }}
-                  >
+              <div className="flex items-end justify-between gap-3">
+                <div className="flex min-w-0 items-baseline gap-1.5">
+                  <span className="font-display text-[27px] font-semibold leading-none tracking-[-0.035em] tabular-nums">
                     {formatCredits(remaining)}
-                  </strong>
-                </span>
-                <span className={cn("text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>/ {formatCredits(total)} {unit}</span>
-                <div className={cn("ml-auto flex items-center gap-1.5 text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>
-                  <Clock3 className="size-3.5 shrink-0" />
-                  <span className="whitespace-nowrap tabular-nums">{updatedAt ? `${formatQuotaUpdatedAt(updatedAt)} 更新` : "—"}</span>
+                  </span>
+                  <span className="truncate text-[11px] text-muted-foreground">
+                    / {formatCredits(total)} {unit}
+                  </span>
                 </div>
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-medium tabular-nums",
+                    expired
+                      ? "bg-destructive/10 text-destructive"
+                      : expiringSoon
+                        ? "bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                        : "bg-primary/8 text-primary",
+                  )}
+                >
+                  {expired ? "已过期" : expiresAt ? `剩余 ${Math.max(0, Math.ceil((expiresAt - Date.now()) / 86400000))} 天` : "长期有效"}
+                </span>
               </div>
 
-              <div className={cn("flex items-center justify-between", compact ? "mt-3" : "mt-4")}>
-                <span className={cn("font-medium text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>剩余额度</span>
-                <span className={cn("whitespace-nowrap tabular-nums", expired ? "text-destructive" : expiringSoon ? "text-orange-600 dark:text-orange-400" : "text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>
-                  {expiresAt ? `到期 ${new Date(expiresAt).toLocaleDateString("zh-CN")}` : "长期有效"}
-                </span>
-              </div>
-              <div className={cn("h-1 overflow-hidden rounded-full bg-muted", compact ? "mt-1" : "mt-1.5")} aria-hidden="true">
+              <div
+                className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(clampedPercent)}
+                aria-label="剩余额度"
+              >
                 <div
-                  className={cn("h-full rounded-full", expired ? "bg-destructive/60" : expiringSoon ? "bg-orange-500" : "bg-primary")}
-                  style={{ width: `${Math.min(100, Math.max(2, percent ?? 0))}%` }}
+                  className={cn(
+                    "h-full rounded-full transition-[width] duration-500",
+                    expired ? "bg-destructive/60" : expiringSoon ? "bg-amber-500" : "bg-gradient-to-r from-primary/75 to-primary",
+                  )}
+                  style={{ width: `${clampedPercent > 0 ? Math.max(2, clampedPercent) : 0}%` }}
                 />
               </div>
 
-              <div className={cn("text-muted-foreground", compact ? "mt-2 text-[11px]" : "mt-2 text-xs")}>切换于 {formatSwitchedAt(account.lastSwitchAt)}</div>
-              {account.lastError && (
-                <div className={cn("mt-1 min-w-0 truncate text-destructive", compact ? "text-[11px]" : "text-xs")} title={account.lastError}>
-                  最近异常：{account.lastError}
-                </div>
-              )}
+              <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[10.5px] text-muted-foreground">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <Clock3 className="size-3 shrink-0" />
+                  <span className="truncate">{expiresAt ? `到期 ${new Date(expiresAt).toLocaleDateString("zh-CN")}` : "长期有效"}</span>
+                </span>
+                <span className="truncate text-right">{updatedAt ? `${formatQuotaUpdatedAt(updatedAt)} 更新` : "未更新"}</span>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <ArrowLeftRight className="size-3 shrink-0" />
+                  <span className="truncate">切换于 {formatSwitchedAt(account.lastSwitchAt)}</span>
+                </span>
+                <span className="truncate text-right">{percent != null ? `剩余 ${Math.round(clampedPercent)}%` : "占比未知"}</span>
+              </div>
+              {quotaError}
             </>
           )}
+          {account.lastError && !creditError ? (
+            <div className="mt-2 truncate text-[10.5px] text-destructive" title={account.lastError}>
+              最近异常：{account.lastError}
+            </div>
+          ) : null}
         </section>
 
-        {!compact && (
-          <footer className="flex flex-wrap items-center gap-2.5 border-t px-5 py-2.5">
-            {clientActive ? (
-              <span className="inline-flex h-7 items-center gap-1.5 rounded-full border border-primary/25 bg-primary/10 px-2.5 pr-3.5 text-xs font-medium text-primary">
-                <Mark size={18} />
-                <span>客户端当前</span>
-              </span>
-            ) : (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" disabled={clientBusy || clientLoading} onClick={() => onSwitch(account)} aria-label="切换到客户端" aria-busy={clientLoading}>
-                    {clientLoading ? <Loader2 className="size-4 animate-spin" /> : <Mark size={18} />}
-                    <span>{clientLoading ? "切换中…" : "切换到客户端"}</span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="space-y-0.5">
-                  <div>切换为客户端登录账号（会重启 Qoder）</div>
-                  <div className="text-muted-foreground">上次设为当前：{formatSwitchedAt(account.lastSwitchAt)}</div>
-                </TooltipContent>
-              </Tooltip>
-            )}
+        <footer className="flex flex-wrap items-center gap-1.5 border-t border-border/70 bg-muted/20 px-3 py-2.5">
+          {clientActive ? (
+            <span className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-primary/20 bg-primary/[0.06] px-2.5 text-[11.5px] font-medium text-primary">
+              <Mark size={16} />
+              客户端当前
+            </span>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 border-primary/25 px-2.5 text-[11.5px] text-primary hover:bg-primary/[0.06] hover:text-primary"
+              disabled={clientBusy || clientLoading}
+              onClick={() => onSwitch(account)}
+              aria-label="切换到客户端"
+              aria-busy={clientLoading}
+            >
+              {clientLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Mark size={16} />}
+              <span>{clientLoading ? "切换中" : "切换到客户端"}</span>
+            </Button>
+          )}
+          <div className="ml-auto flex items-center gap-0.5">
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" onClick={() => onRefresh(account)} aria-label="刷新 Token">
-                  <RefreshCw className="size-4" /><span>刷新 Token</span>
+                <Button variant="ghost" size="icon" className="size-8 rounded-lg" onClick={() => onRefresh(account)} aria-label="刷新 Token">
+                  <RefreshCw className="size-3.5" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top">刷新登录令牌</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" onClick={() => onCheckin(account)} aria-label="手动签到">
-                  <Coins className="size-4" /><span>签到</span>
+                <Button variant="ghost" size="icon" className="size-8 rounded-lg" onClick={() => onCheckin(account)} aria-label="手动签到">
+                  <Coins className="size-3.5" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top">领取签到积分</TooltipContent>
             </Tooltip>
-          </footer>
-        )}
+          </div>
+        </footer>
       </article>
 
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除账号</DialogTitle>
-            <DialogDescription>
-              确定删除账号「{displayName}」？删除后不可恢复，客户端的登录态不受影响。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>取消</Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                setDeleteOpen(false);
-                onDelete(account);
-              }}
-            >
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DeleteDialog open={deleteOpen} onOpenChange={setDeleteOpen} name={displayName} onConfirm={() => onDelete(account)} />
     </TooltipProvider>
+  );
+}
+
+function DeleteDialog({
+  open, onOpenChange, name, onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  name: string;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>删除账号</DialogTitle>
+          <DialogDescription>
+            确定删除账号「{name}」？删除后不可恢复，Qoder 客户端的登录态不受影响。
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button
+            variant="destructive"
+            onClick={() => {
+              onOpenChange(false);
+              onConfirm();
+            }}
+          >
+            删除
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

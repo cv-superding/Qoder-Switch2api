@@ -9,6 +9,16 @@ function openApi(edition, p) {
   return edition.oauth.openApiBaseUrl + p;
 }
 
+/** 上游时间可能是 ISO 字符串、秒级或毫秒级时间戳，统一成毫秒 */
+function normalizeTime(raw) {
+  if (raw == null || raw === "") return null;
+  if (typeof raw === "number") return raw < 1e12 ? raw * 1000 : raw;
+  const num = Number(raw);
+  if (Number.isFinite(num)) return num < 1e12 ? num * 1000 : num;
+  const parsed = Date.parse(String(raw));
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 function authHeaders(account) {
   return { Authorization: `Bearer ${account.pat || account.securityOauthToken}` };
 }
@@ -25,7 +35,7 @@ export async function getQuotaUsage(edition, account) {
     usageType: data.usageType || "",
     totalUsagePercentage: data.totalUsagePercentage ?? null,
     isQuotaExceeded: Boolean(data.isQuotaExceeded),
-    expiresAt: data.expiresAt ?? null,
+    expiresAt: normalizeTime(data.expiresAt),
     quota: data.userQuota
       ? {
           total: data.userQuota.total ?? null,
@@ -50,8 +60,8 @@ export async function getUserPlan(edition, account) {
     userType: data.user_type || data.userType || "",
     planTierName: data.plan_tier_name || data.planTierName || "",
     isPersonalVersion: Boolean(data.is_personal_version),
-    startDate: data.start_date ?? null,
-    endDate: data.end_date ?? null,
+    startDate: normalizeTime(data.start_date ?? data.startDate),
+    endDate: normalizeTime(data.end_date ?? data.endDate),
   };
 }
 

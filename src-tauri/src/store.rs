@@ -27,19 +27,19 @@ pub fn save_json<T: Serialize>(name: &str, value: &T) {
     }
 }
 
-/// 读取加密的敏感数据；解密失败时尝试明文兼容
-pub fn load_encrypted<T: DeserializeOwned + Default>(name: &str) -> T {
+/// 读取加密的敏感数据为 JSON 值；解密失败时尝试明文兼容
+pub fn load_encrypted_value(name: &str) -> Option<serde_json::Value> {
     let file = data_file(name);
-    match fs::read_to_string(&file) {
-        Ok(raw) => {
-            if let Some(decrypted) = decrypt_secret(raw.trim()) {
-                serde_json::from_str(&decrypted).unwrap_or_default()
-            } else {
-                serde_json::from_str(&raw).unwrap_or_default()
-            }
-        }
-        Err(_) => T::default(),
-    }
+    let raw = fs::read_to_string(&file).ok()?;
+    let plain = decrypt_secret(raw.trim()).unwrap_or(raw);
+    serde_json::from_str(&plain).ok()
+}
+
+/// 读取加密的敏感数据
+pub fn load_encrypted<T: DeserializeOwned + Default>(name: &str) -> T {
+    load_encrypted_value(name)
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
 }
 
 pub fn save_encrypted<T: Serialize>(name: &str, value: &T) {

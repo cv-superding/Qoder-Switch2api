@@ -33,8 +33,8 @@ export interface Account {
   lastError: string;
   lastUsedAt: number | null;
   lastSwitchAt: number | null;
-  tokenExpireAt: string | null;
-  refreshTokenExpireAt: string | null;
+  tokenExpireAt: number | null;
+  refreshTokenExpiresAt: number | null;
   machineId: string;
   quota: {
     total: number | null;
@@ -45,7 +45,7 @@ export interface Account {
     expiresAt: number | null;
     updatedAt: number;
   } | null;
-  plan: { userType: string; planTierName: string; endDate: number | null } | null;
+  plan: PlanInfo | null;
   createdAt: number;
   updatedAt: number;
   hasToken: boolean;
@@ -75,10 +75,16 @@ export interface ProxyConfig {
   accountGroup: string;
 }
 
+export interface ProxyStatus extends ProxyConfig {
+  running: boolean;
+  hasApiKey: boolean;
+  error: string;
+}
+
 export interface EditionStatus {
   client: ClientInfo;
   currentAccount: { uid: string; name: string; email: string; id: string; at: number } | null;
-  proxy: ProxyConfig & { running: boolean };
+  proxy: ProxyStatus;
   accounts: number;
   proxyAccounts: number;
 }
@@ -101,8 +107,8 @@ export interface QuotaInfo {
 export interface PlanInfo {
   userType: string;
   planTierName: string;
-  isPersonalVersion: boolean;
-  startDate: number | null;
+  isPersonalVersion?: boolean;
+  startDate?: number | null;
   endDate: number | null;
 }
 
@@ -141,6 +147,19 @@ export interface Settings {
   autoCheckin: { enabled: boolean; hour: number };
   endpointOverrides: Record<string, Record<string, string>>;
   proxy: { domestic: ProxyConfig; international: ProxyConfig };
+}
+
+export interface CheckinResult {
+  id: string;
+  name: string;
+  result: "success" | "already" | "none" | "error";
+  rewardCredit?: number | null;
+  error?: string;
+}
+
+export interface BackupResult {
+  imported: number;
+  skipped: { index: number; name: string; error: string }[];
 }
 
 export const ACCOUNT_GROUPS = [

@@ -1,30 +1,36 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
-  Columns3, Download, FileDown, FileUp, KeyRound, Loader2, QrCode, RefreshCw, Rows3,
+  Columns3, Download, FileDown, FileUp, KeyRound, Loader2, LogIn, MoreHorizontal, Network, RefreshCw, Rows3,
+  ShieldAlert, TriangleAlert, UserRoundCheck, Users,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { AccountCard } from "@/components/account-card";
 import { AddAccountDialog } from "@/components/add-account-dialog";
 import { OAuthLoginDialog } from "@/components/oauth-login-dialog";
 import { SwitchAccountDialog } from "@/components/switch-account-dialog";
 import { ExportAccountsDialog, ImportAccountsDialog } from "@/components/account-backup-dialogs";
-import { QoderCnMark, QoderMark, StatusDot } from "@/components/product-marks";
+import { EmptyState } from "@/components/empty-state";
+import { PageHeader } from "@/components/page-header";
+import { QoderCnMark, QoderMark } from "@/components/product-marks";
+import { Segmented } from "@/components/segmented";
+import { StatCard } from "@/components/stat-card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
-import { Switch } from "@/components/ui/switch";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import * as api from "@/lib/api";
-import { EDITIONS, accountGroupLabel, type Account, type Edition } from "@/lib/types";
+import { accountGroupLabel, type Account, type Edition } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useAccountsStore } from "@/stores/accounts";
 
 export default function AccountsPage() {
   const {
     accounts, status, loading, error, fetchAll, deleteAccount, importLocal,
-    creditMap, creditLoadingMap, refreshingCredits, ensureCredits, refreshCredits, setAccountGroupLocal,
+    creditMap, creditLoadingMap, creditErrorMap, refreshingCredits, ensureCredits, refreshCredits, setAccountGroupLocal,
   } = useAccountsStore();
 
   const [editionTab, setEditionTab] = useState<Edition>(() => {
@@ -39,7 +45,7 @@ export default function AccountsPage() {
   const [importing, setImporting] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [checkinMap, setCheckinMap] = useState<Record<string, boolean>>({});
-  const [compact, setCompact] = useState<boolean>(() => localStorage.getItem("qoder-switch2api.compact") !== "0");
+  const [compact, setCompact] = useState<boolean>(() => localStorage.getItem("qoder-switch2api.compact") === "1");
 
   useEffect(() => {
     void fetchAll();
@@ -49,6 +55,24 @@ export default function AccountsPage() {
     if (accounts.length === 0) return;
     void ensureCredits(accounts.map((a) => a.id));
   }, [accounts, ensureCredits]);
+
+  useEffect(() => {
+    void api.api
+      .getCheckinLogs()
+      .then((res) => {
+        const today = new Date().toDateString();
+        const next: Record<string, boolean> = {};
+        for (const log of res.logs ?? []) {
+          const ts = Number(log.ts);
+          const accountId = String(log.accountId ?? "");
+          const result = String(log.result ?? "");
+          if (!accountId || !ts || new Date(ts).toDateString() !== today) continue;
+          if (result === "success" || result === "replayed" || result === "already") next[accountId] = true;
+        }
+        setCheckinMap(next);
+      })
+      .catch(() => {});
+  }, []);
 
   const editionAccounts = useMemo(
     () => accounts.filter((a) => (a.edition === "international") === (editionTab === "international")),
@@ -63,8 +87,16 @@ export default function AccountsPage() {
 
   const editionStatus = status?.editions?.[editionTab];
   const currentUid = editionStatus?.currentAccount?.uid;
+  const proxyAvailable = (status?.counts.proxyDomestic ?? 0) + (status?.counts.proxyInternational ?? 0);
+  const detectedClients = [status?.editions?.domestic?.client, status?.editions?.international?.client].filter(
+    (client) => client?.exists,
+  ).length;
+  const needsAttention = accounts.filter(
+    (a) => a.status === "needs_relogin" || a.cooling || (typeof a.tokenExpireAt === "number" && a.tokenExpireAt < Date.now()),
+  ).length;
+  const checkedToday = editionAccounts.filter((a) => checkinMap[a.id]).length;
 
-  /** 按紧急程度排序：需重登录 > 额度将尽 > 其他 */
+  /** 按紧急程度排序：需重登录 > 额度将尽 > 冷却中 > 其他 */
   const orderedAccounts = useMemo(() => {
     const rank = (a: Account) => {
       if (a.status === "needs_relogin") return 0;
@@ -104,17 +136,29 @@ export default function AccountsPage() {
     }
   }
 
+  function markCheckedIn(id: string) {
+    setCheckinMap((prev) => ({ ...prev, [id]: true }));
+  }
+
   async function onCheckin(a: Account) {
     try {
       const res = await api.api.checkinAll([a.id]);
       const entry = res.accounts[0];
       if (!entry) return;
-      const label = entry.result === "success" ? "签到成功" : entry.result === "already" ? "今天已签到" : "签到失败";
-      if (entry.result === "error") toast.error(label, { description: entry.error });
-      else toast.success(label, { description: `${entry.name}${entry.rewardCredit ? ` +${entry.rewardCredit} credits` : ""}` });
-      if (entry.result !== "error") {
-        setCheckinMap((prev) => ({ ...prev, [a.id]: true }));
+      if (entry.result === "success") {
+        toast.success("签到成功", {
+          description: `${entry.name}${entry.rewardCredit ? ` +${entry.rewardCredit} credits` : ""}`,
+        });
+        markCheckedIn(a.id);
         void refreshCredits([a.id]);
+      } else if (entry.result === "already") {
+        toast.info("今天已签到", { description: entry.name });
+        markCheckedIn(a.id);
+        void refreshCredits([a.id]);
+      } else if (entry.result === "none") {
+        toast.info("暂无可签到活动", { description: entry.error || "该账号当前没有可领取的奖励" });
+      } else {
+        toast.error("签到失败", { description: entry.error });
       }
     } catch (e) {
       toast.error("签到失败", { description: api.asError(e) });
@@ -123,7 +167,7 @@ export default function AccountsPage() {
 
   async function onRefresh(a: Account) {
     try {
-      const res = await api.api.refreshToken(a.id);
+      await api.api.refreshToken(a.id);
       toast.success("Token 已刷新", { description: a.name || a.email || a.uid });
       void fetchAll();
       void refreshCredits([a.id]);
@@ -136,6 +180,7 @@ export default function AccountsPage() {
     try {
       await deleteAccount(a.id);
       toast.success("账号已删除");
+      void fetchAll();
     } catch (e) {
       toast.error("删除失败", { description: api.asError(e) });
     }
@@ -153,103 +198,117 @@ export default function AccountsPage() {
 
   async function onRefreshCredits() {
     if (editionAccounts.length === 0) return;
+    let success = 0;
+    let already = 0;
+    let none = 0;
+    let failed = 0;
     try {
       const res = await api.api.checkinAll(editionAccounts.map((a) => a.id));
-      const success = res.accounts.filter((e) => e.result === "success").length;
-      const already = res.accounts.filter((e) => e.result === "already").length;
-      const failed = res.accounts.filter((e) => e.result === "error").length;
+      success = res.accounts.filter((e) => e.result === "success").length;
+      already = res.accounts.filter((e) => e.result === "already").length;
+      none = res.accounts.filter((e) => e.result === "none").length;
+      failed = res.accounts.filter((e) => e.result === "error").length;
       const parts: string[] = [];
       if (success > 0) parts.push(`${success} 个签到成功`);
-      if (already > 0) parts.push(`${already} 个已签到`);
+      if (already > 0) parts.push(`${already} 个今日已签`);
+      if (none > 0) parts.push(`${none} 个无可领取活动`);
       if (failed > 0) parts.push(`${failed} 个失败`);
-      toast.success("批量签到完成", { description: parts.join("，") || "无账号需要签到" });
       const next: Record<string, boolean> = {};
-      for (const e of res.accounts) if (e.result !== "error") next[e.id] = true;
+      for (const entry of res.accounts) {
+        if (entry.result === "success" || entry.result === "already") next[entry.id] = true;
+      }
       setCheckinMap((prev) => ({ ...prev, ...next }));
+      const description = parts.join("，") || "没有需要处理的账号";
+      if (failed > 0 && success + already === 0) toast.error("批量签到失败", { description });
+      else toast.success("批量签到完成", { description });
     } catch (e) {
       toast.error("批量签到失败", { description: api.asError(e) });
     }
     await refreshCredits(editionAccounts.map((a) => a.id));
-    toast.success("积分已刷新");
   }
 
   const client = editionStatus?.client;
+  const editionLabel = editionTab === "domestic" ? "国内版" : "国际版";
 
   return (
     <div>
-      <header className="mb-6">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h1 className="text-[28px] font-semibold tracking-tight">账号管理</h1>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              统一管理 Qoder（国内版 Qoder CN / 国际版）账号、额度、签到与客户端切换。两个版本账号体系完全独立。
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2.5 pt-1">
-            <span className="group relative inline-flex cursor-default">
-              <span className={cn("inline-flex rounded-[22%] p-[2px]", client?.exists ? "bg-primary shadow-sm shadow-primary/40" : "bg-muted-foreground/30")}>
-                <QoderCnMark size={28} />
-              </span>
-              <span className="pointer-events-none absolute right-0 top-full z-50 mt-2 hidden whitespace-nowrap rounded-md bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-lg ring-1 ring-black/5 group-hover:block">
-                Qoder CN：{client?.exists ? (client.authKind ? "已检测到登录态" : "未登录") : "未安装"}
-              </span>
-            </span>
-            <span className="group relative inline-flex cursor-default">
-              <span className={cn("inline-flex rounded-[22%] p-[2px]", status?.editions?.international?.client?.exists ? "bg-primary shadow-sm shadow-primary/40" : "bg-muted-foreground/30")}>
-                <QoderMark size={28} />
-              </span>
-              <span className="pointer-events-none absolute right-0 top-full z-50 mt-2 hidden whitespace-nowrap rounded-md bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-lg ring-1 ring-black/5 group-hover:block">
-                Qoder 国际版：{status?.editions?.international?.client?.exists ? "已检测到登录态" : "未安装"}
-              </span>
-            </span>
-          </div>
-        </div>
-      </header>
-
-      {/* 添加与迁移账号 */}
-      <div className="relative mb-6 overflow-visible rounded-2xl border border-border bg-muted/30 px-5 py-5 shadow-[0_6px_20px_rgba(15,23,42,.025)]">
-        <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
-          <div className="absolute -right-12 -top-20 size-44 rounded-full border-[28px] border-slate-400/[0.035]" />
-        </div>
-        <div className="relative flex flex-wrap items-center gap-x-5 gap-y-4">
-          <div className="min-w-[190px] flex-1">
-            <h2 className="text-sm font-semibold text-foreground">添加与迁移账号</h2>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              当前目标版本：<span className="font-medium text-foreground">{editionTab === "domestic" ? "国内版（Qoder CN）" : "国际版（Qoder）"}</span>
-              {client?.dir ? (
-                <>
-                  <br />
-                  客户端目录：<code className="text-[10px] break-all">{client.dir}</code>
-                  {client.authKind ? `（${client.authKind}）` : "（未检测到登录态）"}
-                </>
-              ) : null}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2.5">
-            <Button className="h-10 bg-primary px-4 text-primary-foreground shadow-sm hover:bg-primary/90" onClick={() => setOauthOpen(true)}>
-              <QrCode />扫码添加（{editionTab === "domestic" ? "国内版" : "国际版"}）
+      <PageHeader
+        icon={Users}
+        title="账号管理"
+        description="集中管理国内版 Qoder CN 与国际版 Qoder 账号，处理登录态切换、额度刷新、每日签到与反代分组。"
+        actions={
+          <>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" aria-label="更多账号操作" className="size-9">
+                  <MoreHorizontal />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuLabel>添加账号</DropdownMenuLabel>
+                <DropdownMenuItem onSelect={() => setAddOpen(true)}>
+                  <KeyRound />手动添加
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={onImport} disabled={importing}>
+                  <Download />导入本机账号
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>备份与迁移</DropdownMenuLabel>
+                <DropdownMenuItem onSelect={() => setImportOpen(true)}>
+                  <FileUp />导入备份
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setExportOpen(true)} disabled={accounts.length === 0}>
+                  <FileDown />导出备份
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button onClick={() => setAddOpen(true)} variant="outline" className="hidden sm:inline-flex">
+              <KeyRound />手动添加
             </Button>
-            <Button className="h-10 px-4" onClick={onImport} disabled={importing} variant="outline">
+            <Button onClick={onImport} disabled={importing} variant="outline" className="hidden sm:inline-flex">
               {importing ? <Loader2 className="animate-spin" /> : <Download />}
               导入本机账号
             </Button>
-            <Button className="h-10 px-4" onClick={() => setAddOpen(true)} variant="outline">
-              <KeyRound />手动添加
+            <Button onClick={() => setOauthOpen(true)}>
+              <LogIn />OAuth 登录
             </Button>
-          </div>
-          <div className="flex items-center gap-1">
-            <Button variant="ghost" size="sm" className="h-9 px-2.5" onClick={() => setImportOpen(true)} title="从备份文件导入账号">
-              <FileUp />导入备份
-            </Button>
-            <Button variant="ghost" size="sm" className="h-9 px-2.5" onClick={() => setExportOpen(true)} disabled={accounts.length === 0} title="导出账号备份">
-              <FileDown />导出
-            </Button>
-          </div>
-        </div>
+          </>
+        }
+      />
+
+      <div className="mb-6 grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+        <StatCard
+          label="账号总数"
+          value={accounts.length}
+          icon={Users}
+          hint={`国内 ${editionCounts.domestic} · 国际 ${editionCounts.international}`}
+        />
+        <StatCard
+          label="反代可用"
+          value={proxyAvailable}
+          icon={Network}
+          tone="sky"
+          hint="已加入反代账号池"
+        />
+        <StatCard
+          label="客户端检测"
+          value={`${detectedClients} / 2`}
+          icon={UserRoundCheck}
+          tone={detectedClients > 0 ? "brand" : "neutral"}
+          hint={detectedClients > 0 ? "本机客户端已就绪" : "未检测到 Qoder 客户端"}
+        />
+        <StatCard
+          label="需要处理"
+          value={needsAttention}
+          icon={ShieldAlert}
+          tone={needsAttention > 0 ? "amber" : "neutral"}
+          hint={needsAttention > 0 ? "需重登录 / 冷却 / Token 过期" : "所有账号状态正常"}
+        />
       </div>
 
       {error ? (
         <Alert variant="destructive" className="mb-4">
+          <TriangleAlert />
           <AlertTitle>加载失败</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
@@ -257,87 +316,117 @@ export default function AccountsPage() {
 
       {client?.exists && !client.hasOscryptKey ? (
         <Alert className="mb-4">
+          <ShieldAlert />
           <AlertTitle>客户端登录态读取受限</AlertTitle>
           <AlertDescription>
-            检测到客户端目录但无法解出 OSCrypt 密钥。Windows 下需要 DPAPI（在本机运行即可）；macOS / Linux
-            的密钥在系统钥匙串中，暂不支持自动读写，可改用「扫码添加」或「手动添加」。
+            检测到客户端目录但无法解出 OSCrypt 密钥。Windows 下需要 DPAPI，在本机运行即可；macOS / Linux
+            的密钥存放在系统钥匙串中，暂不支持自动读写，可改用 OAuth 登录或手动添加账号。
           </AlertDescription>
         </Alert>
       ) : null}
 
-      <section className="mt-7 min-w-0" aria-labelledby="accounts-list-title">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 id="accounts-list-title" className="text-base font-semibold tracking-tight">账号</h2>
-            <div role="tablist" aria-label="客户端版本" className="ml-1 inline-flex items-center gap-0.5 rounded-lg border border-border bg-muted/40 p-0.5">
-              {EDITIONS.map((e) => {
-                const active = editionTab === e.value;
-                return (
-                  <button
-                    key={e.value}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => switchTab(e.value)}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                      active ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {e.label}
-                    <span className={cn("rounded-full px-1.5 text-[10px] tabular-nums", active ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground")}>
-                      {editionCounts[e.value]}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            <Badge variant="secondary" className="h-6 min-w-6 rounded-full border-0 px-1.5 text-[11px] tabular-nums text-muted-foreground shadow-none">
-              {editionAccounts.length}
-            </Badge>
+      <section aria-labelledby="accounts-list-title">
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <h2 id="accounts-list-title" className="sr-only">账号列表</h2>
+          <Segmented
+            ariaLabel="客户端版本"
+            value={editionTab}
+            onChange={(next) => switchTab(next as Edition)}
+            options={[
+              {
+                value: "domestic",
+                label: "国内版",
+                count: editionCounts.domestic,
+                icon: <QoderCnMark size={14} />,
+              },
+              {
+                value: "international",
+                label: "国际版",
+                count: editionCounts.international,
+                icon: <QoderMark size={14} />,
+              },
+            ]}
+          />
+
+          <div className="hidden min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground xl:flex">
+            <span className="text-border">|</span>
+            <span className="truncate font-mono text-[10.5px]" title={client?.dir}>
+              {client?.dir || "未检测到客户端目录"}
+            </span>
           </div>
-          <TooltipProvider delayDuration={400}>
-            <div className="ml-auto flex items-center gap-1">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon" className={cn("size-9 rounded-lg", compact && "bg-accent text-accent-foreground")} onClick={toggleCompact} aria-label={compact ? "切换为宽松模式" : "切换为紧凑模式"}>
-                    {compact ? <Rows3 /> : <Columns3 />}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">{compact ? "切换为宽松模式" : "切换为紧凑模式"}</TooltipContent>
-              </Tooltip>
+
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="mr-1 hidden text-[11px] text-muted-foreground sm:inline">
+              {editionLabel} · 今日已签 {checkedToday}
+            </span>
+            <TooltipProvider delayDuration={350}>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="size-9 rounded-lg"
-                    disabled={refreshingCredits || editionAccounts.length === 0}
-                    onClick={() => void onRefreshCredits()}
-                    aria-label="批量签到并刷新积分"
+                    className={cn("size-8 rounded-lg", compact && "bg-accent text-accent-foreground")}
+                    onClick={toggleCompact}
+                    aria-label={compact ? "切换为宽松模式" : "切换为紧凑模式"}
                   >
-                    <RefreshCw className={refreshingCredits ? "animate-spin" : undefined} />
+                    {compact ? <Rows3 /> : <Columns3 />}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="top">批量签到并刷新全部账号积分</TooltipContent>
+                <TooltipContent side="top">{compact ? "切换为宽松模式" : "切换为紧凑模式"}</TooltipContent>
               </Tooltip>
-            </div>
-          </TooltipProvider>
+            </TooltipProvider>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8"
+              disabled={refreshingCredits || editionAccounts.length === 0}
+              onClick={() => void onRefreshCredits()}
+            >
+              <RefreshCw className={cn(refreshingCredits && "animate-spin")} />
+              批量签到
+            </Button>
+          </div>
         </div>
 
         {loading && accounts.length === 0 ? (
-          <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
-            <Loader2 className="animate-spin" />
-            加载账号…
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-[226px] animate-pulse rounded-2xl border border-border/70 bg-card/60" />
+            ))}
           </div>
         ) : editionAccounts.length === 0 ? (
-          <div className="rounded-xl border border-dashed px-4 py-16 text-center text-sm text-muted-foreground">
-            {accounts.length === 0
-              ? "暂无账号。点击上方按钮导入本机账号、扫码登录或手动添加。"
-              : `暂无${editionTab === "domestic" ? "国内版" : "国际版"}账号。切换上方版本标签查看另一版本，或点击「扫码添加 / 导入本机账号」。`}
-          </div>
+          <EmptyState
+            icon={Users}
+            title={`还没有${editionLabel}账号`}
+            description={
+              accounts.length === 0
+                ? "从本机 Qoder 客户端导入登录态，或通过 OAuth 登录、手动输入 Token 添加账号。"
+                : `当前只添加了另一版本的账号。切换到上方版本标签查看，或添加${editionLabel}账号。`
+            }
+            action={
+              <>
+                <Button onClick={() => setOauthOpen(true)}>
+                  <LogIn />OAuth 登录
+                </Button>
+                <Button variant="outline" onClick={onImport} disabled={importing}>
+                  {importing ? <Loader2 className="animate-spin" /> : <Download />}
+                  导入本机账号
+                </Button>
+                <Button variant="ghost" asChild>
+                  <Link to="/settings">配置客户端路径</Link>
+                </Button>
+              </>
+            }
+          />
         ) : (
-          <div className={cn("grid min-w-0 gap-5", compact ? "grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))]" : "grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]")}>
+          <div
+            className={cn(
+              "min-w-0",
+              compact
+                ? "flex flex-col gap-2"
+                : "grid grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))] gap-4",
+            )}
+          >
             {orderedAccounts.map((a) => (
               <AccountCard
                 key={a.id}
@@ -345,7 +434,7 @@ export default function AccountsPage() {
                 compact={compact}
                 credit={creditMap[a.id]}
                 creditLoading={creditLoadingMap[a.id]}
-                creditPriority={false}
+                creditError={creditErrorMap[a.id]}
                 clientActive={Boolean(currentUid && a.uid === currentUid)}
                 clientBusy={switchingId !== null}
                 clientLoading={switchingId === a.id}
@@ -357,6 +446,7 @@ export default function AccountsPage() {
                 onDelete={onDelete}
                 onRefresh={onRefresh}
                 onCheckin={onCheckin}
+                onRefreshCredit={(acc) => void refreshCredits([acc.id])}
                 onSetGroup={onSetGroup}
               />
             ))}
@@ -364,14 +454,14 @@ export default function AccountsPage() {
         )}
       </section>
 
-      <OAuthLoginDialog
-        open={oauthOpen}
-        onOpenChange={setOauthOpen}
-        edition={editionTab}
-        onDone={() => void fetchAll()}
-      />
+      <OAuthLoginDialog open={oauthOpen} onOpenChange={setOauthOpen} edition={editionTab} onDone={() => void fetchAll()} />
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} edition={editionTab} onDone={() => void fetchAll()} />
-      <ExportAccountsDialog open={exportOpen} onOpenChange={setExportOpen} accounts={accounts} onExported={() => {}} />
+      <ExportAccountsDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        accounts={accounts}
+        onExported={() => {}}
+      />
       <ImportAccountsDialog open={importOpen} onOpenChange={setImportOpen} onImported={() => void fetchAll()} />
       <SwitchAccountDialog
         open={switchAccount !== null}

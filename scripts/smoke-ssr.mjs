@@ -84,7 +84,7 @@ for (const [name, Comp, props] of pages) {
     const html = renderToString(
       createElement(MemoryRouter, { initialEntries: ["/"] }, createElement(Comp, props)),
     );
-    const checks = ["Qoder-Switch2api", "账号管理", "扫码添加", "国内版", "国际版"];
+    const checks = ["Qoder-Switch2api", "账号管理", "OAuth 登录", "国内版", "国际版"];
     const found = checks.filter((c) => html.includes(c));
     console.log("SMOKE_OK:" + name + " html=" + html.length + " found=" + found.join("/"));
     if (html.length < 500) { console.log("SMOKE_SUSPICIOUS:" + name + " html too short"); failures += 1; }

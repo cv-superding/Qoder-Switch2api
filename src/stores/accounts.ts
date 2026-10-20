@@ -1,7 +1,7 @@
 /** 全局账号状态（zustand） */
 import { create } from "zustand";
 import * as api from "@/lib/api";
-import type { Account, AppStatus, QuotaInfo, PlanInfo } from "@/lib/types";
+import type { Account, AppStatus, QuotaInfo } from "@/lib/types";
 
 interface AccountsState {
   accounts: Account[];
@@ -10,6 +10,7 @@ interface AccountsState {
   error: string;
   creditMap: Record<string, QuotaInfo>;
   creditLoadingMap: Record<string, boolean>;
+  creditErrorMap: Record<string, string>;
   refreshingCredits: boolean;
   fetchAll: () => Promise<void>;
   deleteAccount: (id: string) => Promise<void>;
@@ -26,6 +27,7 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
   error: "",
   creditMap: {},
   creditLoadingMap: {},
+  creditErrorMap: {},
   refreshingCredits: false,
 
   async fetchAll() {
@@ -40,7 +42,15 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
 
   async deleteAccount(id) {
     await api.api.deleteAccount(id);
-    set((s) => ({ accounts: s.accounts.filter((a) => a.id !== id) }));
+    set((s) => {
+      const creditMap = { ...s.creditMap };
+      const creditLoadingMap = { ...s.creditLoadingMap };
+      const creditErrorMap = { ...s.creditErrorMap };
+      delete creditMap[id];
+      delete creditLoadingMap[id];
+      delete creditErrorMap[id];
+      return { accounts: s.accounts.filter((a) => a.id !== id), creditMap, creditLoadingMap, creditErrorMap };
+    });
   },
 
   async importLocal(edition) {
@@ -61,21 +71,38 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
       pending.map(async (id) => {
         try {
           const res = await api.api.getCredit(id);
-          return [id, res.usage] as const;
-        } catch {
-          return null;
+          return { id, usage: res.usage, plan: res.plan, error: "" };
+        } catch (e) {
+          return { id, usage: null, plan: null, error: api.asError(e) };
         }
       }),
     );
     set((s) => {
       const creditMap = { ...s.creditMap };
       const creditLoadingMap = { ...s.creditLoadingMap };
+      const creditErrorMap = { ...s.creditErrorMap };
+      let accounts = s.accounts;
       for (const entry of entries) {
-        if (entry) creditMap[entry[0]] = entry[1];
-        creditLoadingMap[entry ? entry[0] : ""] = false;
+        if (entry.usage) {
+          creditMap[entry.id] = entry.usage;
+          delete creditErrorMap[entry.id];
+          accounts = accounts.map((a) =>
+            a.id === entry.id
+              ? {
+                  ...a,
+                  plan: entry.plan ?? a.plan,
+                  quota: entry.usage.quota
+                    ? { ...entry.usage.quota, expiresAt: entry.usage.expiresAt, updatedAt: Date.now() }
+                    : a.quota,
+                }
+              : a,
+          );
+        } else {
+          creditErrorMap[entry.id] = entry.error;
+        }
+        creditLoadingMap[entry.id] = false;
       }
-      for (const id of pending) creditLoadingMap[id] = false;
-      return { creditMap, creditLoadingMap };
+      return { creditMap, creditLoadingMap, creditErrorMap, accounts };
     });
   },
 
@@ -87,16 +114,36 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
         ids.map(async (id) => {
           try {
             const res = await api.api.getCredit(id);
-            return [id, res.usage] as const;
-          } catch {
-            return null;
+            return { id, usage: res.usage, plan: res.plan, error: "" };
+          } catch (e) {
+            return { id, usage: null, plan: null, error: api.asError(e) };
           }
         }),
       );
       set((s) => {
         const creditMap = { ...s.creditMap };
-        for (const entry of entries) if (entry) creditMap[entry[0]] = entry[1];
-        return { creditMap };
+        const creditErrorMap = { ...s.creditErrorMap };
+        let accounts = s.accounts;
+        for (const entry of entries) {
+          if (entry.usage) {
+            creditMap[entry.id] = entry.usage;
+            delete creditErrorMap[entry.id];
+            accounts = accounts.map((a) =>
+              a.id === entry.id
+                ? {
+                    ...a,
+                    plan: entry.plan ?? a.plan,
+                    quota: entry.usage.quota
+                      ? { ...entry.usage.quota, expiresAt: entry.usage.expiresAt, updatedAt: Date.now() }
+                      : a.quota,
+                  }
+                : a,
+            );
+          } else {
+            creditErrorMap[entry.id] = entry.error;
+          }
+        }
+        return { creditMap, creditErrorMap, accounts };
       });
     } finally {
       set({ refreshingCredits: false });

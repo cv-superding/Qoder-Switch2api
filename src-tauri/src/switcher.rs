@@ -201,7 +201,7 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
                     },
                 );
             }
-            if let Some(expire) = account.refresh_token_expire_at {
+            if let Some(expire) = account.refresh_token_expires_at {
                 obj.insert(
                     "refreshTokenExpiresAt".into(),
                     if use_iso {

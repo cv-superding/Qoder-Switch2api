@@ -2,6 +2,7 @@
  * WebUI 后端 API（/api/*）。
  */
 import express from "express";
+import { execFile } from "node:child_process";
 import { accountManager } from "../qoder/account.js";
 import { EDITIONS, accountGroupLabel } from "../editions.js";
 import * as oauth from "../qoder/oauth.js";
@@ -11,6 +12,7 @@ import * as sessions from "../sessions.js";
 import { usageStats } from "../proxy/usage.js";
 import { loadJson, saveJson, appendJsonl, readJsonl } from "../store.js";
 import { randomId } from "../crypto.js";
+import { APP_NAME, APP_VERSION } from "../version.js";
 
 export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServers, getEdition, detectClient }) {
   const router = express.Router();
@@ -33,7 +35,7 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
       };
     }
     res.json({
-      version: "1.0.0",
+      version: APP_VERSION,
       editions,
       counts,
       sqlite: switcher.sqliteAvailable(),
@@ -53,6 +55,44 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
     } catch (e) {
       res.status(400).json({ error: e.message });
     }
+  });
+
+  /** 导出账号备份；includeTokens 时包含完整登录态（敏感，仅本机使用） */
+  router.post("/accounts/export", (req, res) => {
+    const includeTokens = Boolean(req.body?.includeTokens);
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : null;
+    const accounts = accountManager.exportList({ includeTokens, ids });
+    res.json({
+      app: "qoder-switch2api",
+      version: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      includesTokens: includeTokens,
+      accounts,
+    });
+  });
+
+  /** 从备份导入账号；包含登录态的条目可直接使用，否则需重新登录 */
+  router.post("/accounts/import", (req, res) => {
+    const list = Array.isArray(req.body?.accounts) ? req.body.accounts : [];
+    if (list.length === 0) return res.status(400).json({ error: "备份中没有可导入的账号" });
+    let imported = 0;
+    const skipped = [];
+    for (let i = 0; i < list.length; i += 1) {
+      const item = list[i] || {};
+      try {
+        accountManager.add(
+          {
+            ...item,
+            authSource: item.authSource || "backup",
+          },
+          { allowEmpty: true },
+        );
+        imported += 1;
+      } catch (e) {
+        skipped.push({ index: i, name: item.name || item.email || item.uid || "", error: e.message });
+      }
+    }
+    res.json({ imported, skipped });
   });
 
   router.patch("/api-account/:id", (req, res) => {
@@ -98,7 +138,7 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
         securityOauthToken: auth.token,
         refreshToken: auth.refreshToken,
         tokenExpireAt: auth.expiresAt,
-        refreshTokenExpireAt: auth.refreshTokenExpiresAt,
+        refreshTokenExpiresAt: auth.refreshTokenExpiresAt,
         machineId: auth.machineId,
         authSource: "client-import",
       });
@@ -109,6 +149,22 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
   });
 
   /* ---------------- OAuth 登录 ---------------- */
+  /** 用系统默认浏览器打开授权链接（桌面窗口内 window.open 不可用） */
+  router.post("/oauth/open-url", (req, res) => {
+    const url = String(req.body?.url || "");
+    if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: "仅支持 http(s) 链接" });
+    const command =
+      process.platform === "win32"
+        ? { file: "rundll32", args: ["url.dll,FileProtocolHandler", url] }
+        : process.platform === "darwin"
+          ? { file: "open", args: [url] }
+          : { file: "xdg-open", args: [url] };
+    execFile(command.file, command.args, { windowsHide: true }, (error) => {
+      if (error) return res.status(500).json({ error: `打开浏览器失败: ${error.message}` });
+      res.json({ ok: true });
+    });
+  });
+
   router.post("/oauth/start", (req, res) => {
     const editionValue = req.body?.edition === "international" ? "international" : "domestic";
     const edition = getEdition(editionValue);
@@ -147,12 +203,12 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
         info.getQuotaUsage(edition, account).catch((e) => ({ error: e.message })),
         info.getUserPlan(edition, account).catch(() => null),
       ]);
-      if (!usage.error) {
-        accountManager.update(account.id, {
-          quota: usage.quota ? { ...usage.quota, expiresAt: usage.expiresAt, updatedAt: Date.now() } : null,
-          plan: plan || account.plan,
-        });
-      }
+      if (usage.error) return res.status(502).json({ error: usage.error });
+      accountManager.update(account.id, {
+        quota: usage.quota ? { ...usage.quota, expiresAt: usage.expiresAt, updatedAt: Date.now() } : null,
+        plan: plan || account.plan,
+        lastError: "",
+      });
       res.json({ usage, plan });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -366,8 +422,8 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
 
   router.get("/about", (req, res) => {
     res.json({
-      name: "Qoder-Switch2api",
-      version: "1.0.0",
+      name: APP_NAME,
+      version: APP_VERSION,
       description: "Qoder（国内版 Qoder CN / 国际版）多账号切换 + OpenAI/Anthropic 兼容反代",
       references: [
         "https://github.com/cv-superding/WorkBuddy-Switch2api（界面与架构参考）",

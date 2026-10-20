@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { Check, Loader2, TriangleAlert } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowLeftRight, Check, Loader2, TriangleAlert } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
@@ -24,41 +25,48 @@ export function SwitchAccountDialog({
   const [steps, setSteps] = useState<Step[]>([]);
   const [done, setDone] = useState(false);
   const [error, setError] = useState("");
-  const [jobId, setJobId] = useState("");
+  const onDoneRef = useRef(onDone);
+  const accountId = account?.id ?? "";
 
   useEffect(() => {
-    if (!open || !account) {
+    onDoneRef.current = onDone;
+  }, [onDone]);
+
+  useEffect(() => {
+    if (!open || !accountId) {
       setSteps([]);
       setDone(false);
       setError("");
-      setJobId("");
       return;
     }
     let cancelled = false;
     let poller: number | null = null;
+    setSteps([]);
+    setDone(false);
+    setError("");
+
     void (async () => {
       try {
-        const res = await api.api.switchAccount(account.id, true);
+        const res = await api.api.switchAccount(accountId, true);
         if (cancelled) return;
-        setJobId(res.jobId);
         poller = window.setInterval(async () => {
           try {
             const job = await api.api.switchJob(res.jobId);
             if (cancelled) return;
             setSteps(job.steps);
             if (job.done) {
-              window.clearInterval(poller!);
+              if (poller) window.clearInterval(poller);
               poller = null;
               if (job.error) {
                 setError(job.error);
               } else {
                 setDone(true);
-                onDone();
+                onDoneRef.current();
               }
             }
           } catch (e) {
             if (!cancelled) {
-              window.clearInterval(poller!);
+              if (poller) window.clearInterval(poller);
               poller = null;
               setError(api.asError(e));
             }
@@ -68,36 +76,63 @@ export function SwitchAccountDialog({
         if (!cancelled) setError(api.asError(e));
       }
     })();
+
     return () => {
       cancelled = true;
       if (poller) window.clearInterval(poller);
     };
-  }, [open, account, onDone]);
+  }, [open, accountId]);
 
   const running = steps.some((s) => s.status === "running");
+  const completed = steps.filter((s) => s.status === "done").length;
+  const progress = steps.length > 0 ? Math.round((completed / steps.length) * 100) : 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>切换 Qoder 客户端账号</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <ArrowLeftRight className="size-5 text-primary" />
+            切换客户端账号
+          </DialogTitle>
           <DialogDescription>
-            将 {editionLabel(account?.edition ?? "domestic")} 客户端的登录账号切换为
-            「{account?.name || account?.email || account?.uid}」，客户端会自动重启。
+            将 {editionLabel(account?.edition ?? "domestic")} 客户端切换为
+            「{account?.name || account?.email || account?.uid}」，完成后会自动重启 Qoder。
           </DialogDescription>
         </DialogHeader>
 
-        <ol className="space-y-2.5">
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-[10.5px] text-muted-foreground">
+            <span>{done ? "切换完成" : error ? "切换失败" : "正在切换"}</span>
+            <span className="tabular-nums">{done ? "4 / 4" : `${completed} / ${Math.max(steps.length, 4)}`}</span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
+            <div
+              className={cn(
+                "h-full rounded-full transition-[width] duration-500",
+                error ? "bg-destructive" : done ? "bg-primary" : "bg-primary/70",
+              )}
+              style={{ width: `${done ? 100 : Math.max(progress, steps.length > 0 ? 8 : 4)}%` }}
+            />
+          </div>
+        </div>
+
+        <ol className="space-y-0.5 rounded-xl border border-border/70 bg-muted/15 p-2" aria-live="polite">
           {steps.length === 0 && !error ? (
-            <li className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" /> 正在启动…
+            <li className="flex items-center gap-2.5 px-2 py-2.5 text-[12px] text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" /> 正在创建切换任务…
             </li>
           ) : null}
           {steps.map((step, i) => (
-            <li key={`${step.name}-${i}`} className="flex items-start gap-2.5 text-sm">
-              <span className="mt-0.5 shrink-0">
+            <li key={`${step.name}-${i}`} className="relative flex items-start gap-2.5 rounded-lg px-2 py-2">
+              {i < steps.length - 1 ? (
+                <span className="absolute left-[15px] top-7 h-[calc(100%_-_12px)] w-px bg-border" aria-hidden="true" />
+              ) : null}
+              <span className="relative z-10 mt-0.5 shrink-0">
                 {step.status === "done" ? (
-                  <Check className="size-4 text-emerald-500" strokeWidth={2.5} />
+                  <span className="inline-flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                    <Check className="size-2.5" strokeWidth={3.5} />
+                  </span>
                 ) : step.status === "error" ? (
                   <TriangleAlert className="size-4 text-destructive" />
                 ) : (
@@ -105,33 +140,33 @@ export function SwitchAccountDialog({
                 )}
               </span>
               <span className="min-w-0 flex-1">
-                <span className={cn("font-medium", step.status === "error" && "text-destructive")}>{step.name}</span>
-                {step.detail ? <span className="ml-2 text-xs text-muted-foreground">{step.detail}</span> : null}
+                <span className={cn("text-[12px] font-medium", step.status === "error" && "text-destructive")}>{step.name}</span>
+                {step.detail ? <span className="mt-0.5 block break-all text-[10.5px] leading-5 text-muted-foreground">{step.detail}</span> : null}
               </span>
             </li>
           ))}
         </ol>
 
         {error ? (
-          <div className="rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-            {error}
+          <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/[0.05] px-3.5 py-2.5 text-[11.5px] text-destructive">
+            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+            <span>{error}</span>
           </div>
         ) : null}
 
         {done ? (
-          <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">
-            切换完成，客户端正在以新账号启动。
+          <div className="flex items-start gap-2 rounded-xl border border-primary/25 bg-primary/[0.05] px-3.5 py-2.5 text-[11.5px] text-primary">
+            <Check className="mt-0.5 size-3.5 shrink-0" />
+            <span>登录态已写入，客户端正在以新账号启动。</span>
           </div>
         ) : null}
 
-        <DialogDescription className="text-xs">
-          原理：备份客户端登录态（auth.v1.dat / state.vscdb）→ 结束 Qoder 进程 → 写入目标账号凭证 →
-          重新启动客户端。备份文件保留在客户端数据目录中。
-        </DialogDescription>
-
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[10px] leading-4 text-muted-foreground">
+            会先备份 auth.v1.dat / state.vscdb，备份文件保留在客户端数据目录。
+          </p>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={running}>
-            {done || error ? "关闭" : "取消"}
+            {done || error ? "关闭" : running ? "切换中…" : "取消"}
           </Button>
         </div>
       </DialogContent>

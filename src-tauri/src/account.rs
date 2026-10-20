@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::crypto::{now_ms, random_id};
 use crate::editions::{edition_of, Edition};
-use crate::store::{load_encrypted, save_encrypted};
+use crate::store::{load_encrypted_value, save_encrypted};
 
 pub const COOLDOWN_MS: i64 = 120 * 1000;
 pub const AUTH_ERROR_COOLDOWN_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
     pub edition: String,
@@ -43,8 +44,8 @@ pub struct Account {
     pub refresh_token: String,
     #[serde(default)]
     pub token_expire_at: Option<i64>,
-    #[serde(default)]
-    pub refresh_token_expire_at: Option<i64>,
+    #[serde(default, alias = "refreshTokenExpireAt")]
+    pub refresh_token_expires_at: Option<i64>,
     #[serde(default)]
     pub pat: String,
     #[serde(default)]
@@ -143,7 +144,7 @@ pub struct AccountMeta {
     pub last_used_at: Option<i64>,
     pub last_switch_at: Option<i64>,
     pub token_expire_at: Option<i64>,
-    pub refresh_token_expire_at: Option<i64>,
+    pub refresh_token_expires_at: Option<i64>,
     pub machine_id: String,
     pub quota: Option<QuotaSnapshot>,
     pub plan: Option<PlanSnapshot>,
@@ -171,7 +172,7 @@ fn to_meta(a: &Account) -> AccountMeta {
         last_used_at: a.last_used_at,
         last_switch_at: a.last_switch_at,
         token_expire_at: a.token_expire_at,
-        refresh_token_expire_at: a.refresh_token_expire_at,
+        refresh_token_expires_at: a.refresh_token_expires_at,
         machine_id: a.machine_id.clone(),
         quota: a.quota.clone(),
         plan: a.plan.clone(),
@@ -251,6 +252,7 @@ mod chrono_lite {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountInput {
     pub edition: Option<String>,
     #[serde(default)]
@@ -315,9 +317,50 @@ pub struct ClientCurrent {
     pub at: i64,
 }
 
+fn camelize_account_keys(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else { return };
+    let keys: Vec<String> = obj.keys().cloned().collect();
+    for key in keys {
+        if !key.contains('_') {
+            continue;
+        }
+        let camel = key
+            .split('_')
+            .enumerate()
+            .map(|(index, part)| {
+                if index == 0 {
+                    part.to_string()
+                } else {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                }
+            })
+            .collect::<String>();
+        if let Some(value) = obj.remove(&key) {
+            obj.entry(camel).or_insert(value);
+        }
+    }
+    if let Some(value) = obj.remove("refreshTokenExpireAt") {
+        obj.entry("refreshTokenExpiresAt").or_insert(value);
+    }
+}
+
 impl AccountManager {
     pub fn load() -> Self {
-        let accounts = load_encrypted::<Vec<Account>>("accounts.json");
+        // 兼容旧版 Rust 写入的 snake_case 账号库，同时直接读取 Node 版的 camelCase 数据
+        let accounts = load_encrypted_value("accounts.json")
+            .map(|mut value| {
+                if let Some(list) = value.as_array_mut() {
+                    for item in list {
+                        camelize_account_keys(item);
+                    }
+                }
+                serde_json::from_value::<Vec<Account>>(value).unwrap_or_default()
+            })
+            .unwrap_or_default();
         AccountManager {
             accounts,
             ..Default::default()
@@ -358,9 +401,13 @@ impl AccountManager {
     }
 
     pub fn add(&mut self, input: &AccountInput) -> Result<Account, String> {
+        self.add_with_options(input, false)
+    }
+
+    pub fn add_with_options(&mut self, input: &AccountInput, allow_empty: bool) -> Result<Account, String> {
         let edition = input.edition.clone().unwrap_or_else(|| "domestic".into());
         let edition = if edition == "international" { "international" } else { "domestic" };
-        if input.security_oauth_token.is_empty() && input.pat.is_empty() {
+        if input.security_oauth_token.is_empty() && input.pat.is_empty() && !allow_empty {
             return Err("缺少登录凭证：需要 securityOauthToken 或 PAT".into());
         }
         let now = now_ms();
@@ -407,6 +454,9 @@ impl AccountManager {
             {
                 let existing = &mut self.accounts[pos];
                 apply_normalized(existing, &normalized, now);
+                let has_token = !existing.security_oauth_token.is_empty() || !existing.pat.is_empty();
+                existing.status = if has_token { "active".into() } else { "needs_relogin".into() };
+                existing.last_error = if has_token { String::new() } else { "备份不含登录态，请重新登录".into() };
                 let out = existing.clone();
                 self.save();
                 return Ok(out);
@@ -430,15 +480,23 @@ impl AccountManager {
             security_oauth_token: normalized.security_oauth_token.clone(),
             refresh_token: normalized.refresh_token.clone(),
             token_expire_at: normalized.token_expire_at,
-            refresh_token_expire_at: normalized.refresh_token_expires_at,
+            refresh_token_expires_at: normalized.refresh_token_expires_at,
             pat: normalized.pat.clone(),
             machine_id: normalized.machine_id.clone(),
             machine_token: normalized.machine_token.clone(),
             machine_type: normalized.machine_type.clone(),
             group: normalized.group.clone(),
             auth_source: normalized.auth_source.clone(),
-            status: "active".into(),
-            last_error: String::new(),
+            status: if normalized.security_oauth_token.is_empty() && normalized.pat.is_empty() {
+                "needs_relogin".into()
+            } else {
+                "active".into()
+            },
+            last_error: if normalized.security_oauth_token.is_empty() && normalized.pat.is_empty() {
+                "备份不含登录态，请重新登录".into()
+            } else {
+                String::new()
+            },
             last_used_at: None,
             last_switch_at: to_ms(&input.last_switch_at),
             quota: normalized.quota.clone(),
@@ -509,7 +567,7 @@ impl AccountManager {
             account.token_expire_at = to_ms(&Some(v));
         }
         if let Some(v) = patch.get("refreshTokenExpiresAt").cloned() {
-            account.refresh_token_expire_at = to_ms(&Some(v));
+            account.refresh_token_expires_at = to_ms(&Some(v));
         }
         if let Some(v) = patch.get("lastUsedAt").cloned() {
             account.last_used_at = to_ms(&Some(v));
@@ -739,18 +797,34 @@ fn apply_normalized(account: &mut Account, n: &NormalizedAccount, now: i64) {
     account.org_id = n.org_id.clone();
     account.org_name = n.org_name.clone();
     account.user_type = n.user_type.clone();
-    account.security_oauth_token = n.security_oauth_token.clone();
-    account.refresh_token = n.refresh_token.clone();
-    account.token_expire_at = n.token_expire_at;
-    account.refresh_token_expire_at = n.refresh_token_expires_at;
-    account.pat = n.pat.clone();
+    if !n.security_oauth_token.is_empty() {
+        account.security_oauth_token = n.security_oauth_token.clone();
+    }
+    if !n.refresh_token.is_empty() {
+        account.refresh_token = n.refresh_token.clone();
+    }
+    if n.token_expire_at.is_some() {
+        account.token_expire_at = n.token_expire_at;
+    }
+    if n.refresh_token_expires_at.is_some() {
+        account.refresh_token_expires_at = n.refresh_token_expires_at;
+    }
+    if !n.pat.is_empty() {
+        account.pat = n.pat.clone();
+    }
     account.machine_id = n.machine_id.clone();
     account.machine_token = n.machine_token.clone();
     account.machine_type = n.machine_type.clone();
-    account.group = n.group.clone();
+    if !n.group.is_empty() {
+        account.group = n.group.clone();
+    }
     account.auth_source = n.auth_source.clone();
-    account.quota = n.quota.clone();
-    account.plan = n.plan.clone();
+    if n.quota.is_some() {
+        account.quota = n.quota.clone();
+    }
+    if n.plan.is_some() {
+        account.plan = n.plan.clone();
+    }
     account.updated_at = now;
 }
 

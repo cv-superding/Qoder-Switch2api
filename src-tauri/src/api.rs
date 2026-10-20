@@ -27,6 +27,8 @@ pub fn create_api_router(state: Arc<AppState>) -> Router {
         .route("/status", get(get_status))
         .route("/about", get(get_about))
         .route("/accounts", get(list_accounts).post(add_account))
+        .route("/accounts/export", post(export_accounts))
+        .route("/accounts/import", post(import_accounts))
         .route("/api-account/{id}", patch(update_account))
         .route("/accounts/{id}", delete(delete_account))
         .route("/accounts/{id}/refresh", post(refresh_account))
@@ -96,6 +98,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Response {
                     "extraModels": config.extra_models,
                     "accountGroup": config.account_group,
                     "running": crate::proxy_running(value),
+                    "error": crate::proxy_error(value),
                 },
                 "accounts": counts[value].as_i64().unwrap_or(0),
                 "proxyAccounts": proxy_accounts,
@@ -104,7 +107,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Response {
     }
 
     ok_json(json!({
-        "version": "1.0.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "editions": edition_status,
         "counts": counts,
         "sqlite": true,
@@ -114,7 +117,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Response {
 async fn get_about() -> Response {
     ok_json(json!({
         "name": "Qoder-Switch2api",
-        "version": "1.0.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "description": "Qoder（国内版 Qoder CN / 国际版）多账号切换 + OpenAI/Anthropic 兼容反代",
         "references": [
             "https://github.com/cv-superding/WorkBuddy-Switch2api（界面与架构参考）",
@@ -138,6 +141,83 @@ async fn add_account(State(state): State<Arc<AppState>>, Json(body): Json<Accoun
         Ok(account) => ok_json(json!({ "account": accounts.view(&account) })),
         Err(e) => err(StatusCode::BAD_REQUEST, &e),
     }
+}
+
+async fn export_accounts(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let include_tokens = body.get("includeTokens").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ids: Option<Vec<String>> = body
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+    let accounts = state.accounts.read().await;
+    let mut list = Vec::new();
+    for account in &accounts.accounts {
+        if let Some(ids) = &ids {
+            if !ids.contains(&account.id) {
+                continue;
+            }
+        }
+        let mut value = serde_json::to_value(accounts.view(account)).unwrap_or_default();
+        if include_tokens {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("securityOauthToken".into(), json!(account.security_oauth_token));
+                obj.insert("refreshToken".into(), json!(account.refresh_token));
+                obj.insert("pat".into(), json!(account.pat));
+                obj.insert("machineId".into(), json!(account.machine_id));
+                obj.insert("machineToken".into(), json!(account.machine_token));
+                obj.insert("machineType".into(), json!(account.machine_type));
+            }
+        }
+        list.push(value);
+    }
+    ok_json(json!({
+        "app": "qoder-switch2api",
+        "version": env!("CARGO_PKG_VERSION"),
+        "exportedAt": chrono::Local::now().to_rfc3339(),
+        "includesTokens": include_tokens,
+        "accounts": list,
+    }))
+}
+
+async fn import_accounts(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let items = body
+        .get("accounts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if items.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "备份中没有可导入的账号");
+    }
+    let mut imported = 0;
+    let mut skipped = Vec::new();
+    let mut accounts = state.accounts.write().await;
+    for (index, item) in items.into_iter().enumerate() {
+        let parsed: Result<AccountInput, _> = serde_json::from_value(item.clone());
+        match parsed {
+            Ok(mut input) => {
+                if input.auth_source.is_empty() {
+                    input.auth_source = "backup".into();
+                }
+                match accounts.add_with_options(&input, true) {
+                    Ok(_) => imported += 1,
+                    Err(e) => skipped.push(json!({
+                        "index": index,
+                        "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "error": e
+                    })),
+                }
+            }
+            Err(e) => skipped.push(json!({
+                "index": index,
+                "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "error": e.to_string()
+            })),
+        }
+    }
+    ok_json(json!({ "imported": imported, "skipped": skipped }))
 }
 
 async fn update_account(State(state): State<Arc<AppState>>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
@@ -175,38 +255,41 @@ async fn get_credit(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         }
     };
     let edition = state.effective_edition(&edition_value).await;
-    let usage = info::get_quota_usage(&edition, &account).await;
-    let plan = info::get_user_plan(&edition, &account).await;
-    match (usage, plan) {
-        (Ok(usage), Ok(plan)) => {
-            let quota_patch = usage.quota.as_ref().map(|q| {
-                json!({
-                    "total": q.total,
-                    "used": q.used,
-                    "remaining": q.remaining,
-                    "percentage": q.percentage,
-                    "unit": q.unit,
-                    "expiresAt": usage.expires_at,
-                    "updatedAt": crate::crypto::now_ms()
-                })
-            });
-            let plan_patch = json!({
-                "userType": plan.user_type,
-                "planTierName": plan.plan_tier_name,
-                "endDate": plan.end_date
-            });
-            let mut accounts = state.accounts.write().await;
-            let mut patch = serde_json::Map::new();
-            if let Some(q) = quota_patch {
-                patch.insert("quota".into(), q);
-            }
-            patch.insert("plan".into(), plan_patch);
-            patch.insert("lastError".into(), json!(""));
-            let _ = accounts.update(&id, &Value::Object(patch));
-            ok_json(json!({ "usage": usage, "plan": plan }))
-        }
-        (Err(e), _) | (_, Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    let usage = match info::get_quota_usage(&edition, &account).await {
+        Ok(usage) => usage,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    // 套餐接口失败不影响额度展示
+    let plan = info::get_user_plan(&edition, &account).await.ok();
+    let quota_patch = usage.quota.as_ref().map(|q| {
+        json!({
+            "total": q.total,
+            "used": q.used,
+            "remaining": q.remaining,
+            "percentage": q.percentage,
+            "unit": q.unit,
+            "expiresAt": usage.expires_at,
+            "updatedAt": crate::crypto::now_ms()
+        })
+    });
+    let plan_patch = plan.as_ref().map(|plan| {
+        json!({
+            "userType": plan.user_type,
+            "planTierName": plan.plan_tier_name,
+            "endDate": plan.end_date
+        })
+    });
+    let mut accounts = state.accounts.write().await;
+    let mut patch = serde_json::Map::new();
+    if let Some(q) = quota_patch {
+        patch.insert("quota".into(), q);
     }
+    if let Some(p) = plan_patch {
+        patch.insert("plan".into(), p);
+    }
+    patch.insert("lastError".into(), json!(""));
+    let _ = accounts.update(&id, &Value::Object(patch));
+    ok_json(json!({ "usage": usage, "plan": plan }))
 }
 
 async fn import_client_account(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
