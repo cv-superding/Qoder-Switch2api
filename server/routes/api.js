@@ -9,6 +9,7 @@ import * as oauth from "../qoder/oauth.js";
 import * as info from "../qoder/info.js";
 import * as switcher from "../switcher.js";
 import * as sessions from "../sessions.js";
+import { resolveClientDir } from "../paths.js";
 import { usageStats } from "../proxy/usage.js";
 import { loadJson, saveJson, appendJsonl, readJsonl } from "../store.js";
 import { randomId } from "../crypto.js";
@@ -142,6 +143,12 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
         machineId: auth.machineId,
         authSource: "client-import",
       });
+      accountManager.setClientCurrent(editionValue, {
+        uid: account.uid,
+        name: account.name,
+        email: account.email,
+        id: account.id,
+      });
       res.json({ account: accountManager.publicView(account), source: auth.source });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -169,7 +176,9 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
     const editionValue = req.body?.edition === "international" ? "international" : "domestic";
     const edition = getEdition(editionValue);
     const settings = getSettings();
-    const clientDir = settings.clientDirOverrides?.[editionValue] || null;
+    // 未配置覆盖时也使用自动探测到的客户端目录，复用其 machine_id / machine_token
+    const clientDir =
+      settings.clientDirOverrides?.[editionValue] || resolveClientDir(edition);
     const result = oauth.startLogin(edition, clientDir);
     res.json(result);
   });

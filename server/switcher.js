@@ -83,28 +83,73 @@ function readMachineIdFile(dir) {
 }
 
 /** 在注册表 / 常见路径中查找客户端可执行文件 */
+const exeCache = new Map(); // edition -> { at, path }
+const EXE_CACHE_MS = 60 * 1000;
+
+/** 从正在运行的进程读取真实安装路径（支持自定义安装目录 / 版本化目录） */
+async function findRunningClientExe(edition) {
+  if (process.platform !== "win32") return null;
+  const script = `
+Get-Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.ProcessName -eq 'Qoder' -or $_.ProcessName -eq 'QoderCN' } |
+  ForEach-Object { try { $_.Path } catch {} } |
+  Where-Object { $_ } |
+  Select-Object -Unique
+`.trim();
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { encoding: "utf8", windowsHide: true, maxBuffer: 1024 * 1024 },
+    );
+    const paths = String(stdout).split(/\r?\n/).map((p) => p.trim()).filter(Boolean);
+    if (paths.length === 0) return null;
+    const isCnPath = (p) => /qoder[\s._-]*cn|qodercn/i.test(p);
+    const preferred = edition.value === "domestic" ? paths.filter(isCnPath) : paths.filter((p) => !isCnPath(p));
+    // 无法确定进程属于当前版本时宁可不结束，避免误杀另一版本
+    return preferred[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function findClientExe(edition) {
-  const candidates = [];
-  if (process.platform === "win32") {
+  const cached = exeCache.get(edition.value);
+  if (cached && Date.now() - cached.at < (cached.path ? EXE_CACHE_MS : 15_000)) return cached.path;
+
+  let found = await findRunningClientExe(edition);
+  if (!found && process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA || "";
     const programFiles = process.env.ProgramFiles || "C:\\Program Files";
     const names = edition.clientDirs.map((d) => d.replace(/[^\w\s-]/g, ""));
+    const launcherNames = edition.value === "domestic" ? ["Qoder CN", "QoderCN"] : ["Qoder"];
+    const genericNames = edition.value === "international" ? ["Qoder"] : [];
+    const candidates = [];
     for (const base of [localAppData && path.join(localAppData, "Programs"), programFiles, path.join(programFiles, "x86")]) {
       if (!base) continue;
-      for (const name of [...new Set([...names, "Qoder"])]) {
+      for (const name of [...new Set([...names, ...genericNames])]) {
         candidates.push(path.join(base, name, "Qoder.exe"));
         candidates.push(path.join(base, name, `${name}.exe`));
       }
     }
-  }
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) return c;
-    } catch {
-      /* ignore */
+    if (localAppData) {
+      for (const name of launcherNames) {
+        candidates.push(path.join(localAppData, name, "Qoder Launcher", "Qoder Launcher.exe"));
+      }
+    }
+    for (const candidate of candidates) {
+      try {
+        if (fs.existsSync(candidate)) {
+          found = candidate;
+          break;
+        }
+      } catch {
+        /* ignore */
+      }
     }
   }
-  return null;
+  exeCache.set(edition.value, { at: Date.now(), path: found });
+  return found;
 }
 
 /* ------------------------------------------------------------------ */

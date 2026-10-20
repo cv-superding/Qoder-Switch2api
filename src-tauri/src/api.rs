@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::account::{try_refresh_account, AccountInput};
+use crate::account::{try_refresh_account, AccountInput, ClientCurrent};
 use crate::editions;
 use crate::info;
 use crate::oauth;
@@ -348,7 +348,19 @@ async fn import_client_account(State(state): State<Arc<AppState>>, Json(body): J
     };
     let mut accounts = state.accounts.write().await;
     match accounts.add(&input) {
-        Ok(account) => ok_json(json!({ "account": accounts.view(&account), "source": auth.source })),
+        Ok(account) => {
+            accounts.set_client_current(
+                &edition_value,
+                Some(ClientCurrent {
+                    uid: account.uid.clone(),
+                    name: account.name.clone(),
+                    email: account.email.clone(),
+                    id: account.id.clone(),
+                    at: 0,
+                }),
+            );
+            ok_json(json!({ "account": accounts.view(&account), "source": auth.source }))
+        }
         Err(e) => err(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -450,7 +462,7 @@ async fn oauth_start(State(state): State<Arc<AppState>>, Json(body): Json<Value>
         let settings = state.settings.read().await;
         let override_dir = settings.client_dir_overrides.get(&edition_value).cloned().unwrap_or_default();
         if override_dir.trim().is_empty() {
-            None
+            Some(crate::paths::resolve_client_dir(&edition, ""))
         } else {
             Some(std::path::PathBuf::from(override_dir))
         }

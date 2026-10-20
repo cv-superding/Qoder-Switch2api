@@ -5,9 +5,12 @@
 //! 旧版在 User/globalStorage/state.vscdb 的 secret://aicoding.auth.userInfo。
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -396,34 +399,114 @@ $pids -join ","
 }
 
 /// 在注册表 / 常见路径中查找客户端可执行文件
+static EXE_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Option<String>)>>> = OnceLock::new();
+
+/// 从正在运行的进程读取真实安装路径（支持自定义安装目录 / 版本化目录）
+fn running_client_exe(edition: &Edition) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let script = r#"
+Get-Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.ProcessName -eq 'Qoder' -or $_.ProcessName -eq 'QoderCN' } |
+  ForEach-Object { try { $_.Path } catch {} } |
+  Where-Object { $_ } |
+  Select-Object -Unique
+"#;
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let is_cn = |p: &str| {
+            let lower = p.to_lowercase();
+            lower.contains("qoder cn") || lower.contains("qodercn")
+        };
+        let paths: Vec<String> = stdout
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // 无法确定进程属于当前版本时宁可不结束，避免误杀另一版本
+        let preferred = if edition.value == "domestic" {
+            paths.into_iter().find(|p| is_cn(p))
+        } else {
+            paths.into_iter().find(|p| !is_cn(p))
+        };
+        return preferred;
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 pub fn find_client_exe(edition: &Edition) -> Option<String> {
-    if cfg!(target_os = "windows") {
-        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
-        let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".into());
-        let mut names: Vec<String> = edition.client_dirs.clone();
-        names.push("Qoder".into());
-        for base in [
-            if local_app_data.is_empty() { None } else { Some(format!("{}\\Programs", local_app_data)) },
-            Some(program_files),
-            Some(program_files_x86),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for name in &names {
-                for candidate in [
-                    PathBuf::from(&base).join(name).join("Qoder.exe"),
-                    PathBuf::from(&base).join(name).join(format!("{}.exe", name)),
-                ] {
-                    if candidate.exists() {
-                        return Some(candidate.to_string_lossy().to_string());
-                    }
-                }
-            }
+    let cache = EXE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((at, value)) = cache
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&edition.value).cloned())
+    {
+        let ttl = if value.is_some() {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(15)
+        };
+        if at.elapsed() < ttl {
+            return value;
         }
     }
-    None
+
+    let mut found = running_client_exe(edition);
+    if found.is_none() {
+        #[cfg(windows)]
+        {
+            let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
+            let program_files_x86 =
+                std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".into());
+            let mut names: Vec<String> = edition.client_dirs.clone();
+            if edition.value == "international" {
+                names.push("Qoder".into());
+            }
+            let launcher_names: Vec<&str> = if edition.value == "domestic" {
+                vec!["Qoder CN", "QoderCN"]
+            } else {
+                vec!["Qoder"]
+            };
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            for base in [
+                if local_app_data.is_empty() { None } else { Some(format!("{}\\Programs", local_app_data)) },
+                Some(program_files),
+                Some(program_files_x86),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for name in &names {
+                    candidates.push(PathBuf::from(&base).join(name).join("Qoder.exe"));
+                    candidates.push(PathBuf::from(&base).join(name).join(format!("{}.exe", name)));
+                }
+            }
+            if !local_app_data.is_empty() {
+                for name in launcher_names {
+                    candidates.push(
+                        PathBuf::from(&local_app_data)
+                            .join(name)
+                            .join("Qoder Launcher")
+                            .join("Qoder Launcher.exe"),
+                    );
+                }
+            }
+            found = candidates
+                .into_iter()
+                .find(|path| path.exists())
+                .map(|path| path.to_string_lossy().to_string());
+        }
+    }
+    if let Ok(mut map) = cache.lock() {
+        map.insert(edition.value.clone(), (Instant::now(), found.clone()));
+    }
+    found
 }
 
 pub fn launch_client(exe_path: &str) -> Result<(), String> {

@@ -171,6 +171,13 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 更新日志
 
+### v1.1.5
+
+- 支持自定义安装目录：从运行中的 Qoder 进程识别真实 `Qoder.exe`，修复切换时无法结束/重启客户端
+- 结束进程只匹配当前版本的可执行文件路径，避免误杀另一版本 Qoder
+- OAuth 登录复用已检测客户端的 machine_id / machine_token
+- 导入本机账号后立即标记为客户端当前账号
+
 ### v1.1.4
 
 - 支持新版 Qoder 客户端数据目录 `%APPDATA%/com.qoder.app.stable`，修复误报“未安装”、导入本机账号失败
