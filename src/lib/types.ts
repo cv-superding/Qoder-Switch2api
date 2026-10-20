@@ -142,6 +142,7 @@ export interface ChatItem {
 
 export interface Settings {
   theme: "light" | "dark" | "system";
+  closeToTray: boolean;
   clientDirOverrides: { domestic: string; international: string };
   clientExePaths: { domestic: string; international: string };
   autoCheckin: { enabled: boolean; hour: number };

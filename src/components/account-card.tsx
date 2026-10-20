@@ -114,6 +114,16 @@ export function AccountCard({
     percent = credit.quota.percentage <= 1 ? credit.quota.percentage * 100 : credit.quota.percentage;
   }
   const clampedPercent = percent == null ? 0 : Math.min(100, Math.max(0, percent));
+  // 进度条表示剩余额度，不表示到期紧急程度；到期只通过右侧徽标提示
+  const barTone = expired
+    ? "bg-destructive/70"
+    : percent == null
+      ? "bg-primary"
+      : clampedPercent <= 10
+        ? "bg-destructive/70"
+        : clampedPercent <= 30
+          ? "bg-amber-500"
+          : "bg-gradient-to-r from-primary/75 to-primary";
 
   const tokenExpired = typeof account.tokenExpireAt === "number" && account.tokenExpireAt < Date.now();
   const urgentChip =
@@ -291,7 +301,7 @@ export function AccountCard({
           </div>
           <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
             <div
-              className={cn("h-full rounded-full transition-[width]", expired ? "bg-destructive/60" : expiringSoon ? "bg-amber-500" : "bg-primary")}
+              className={cn("h-full rounded-full transition-[width]", barTone)}
               style={{ width: `${clampedPercent > 0 ? Math.max(2, clampedPercent) : 0}%` }}
             />
           </div>
@@ -386,10 +396,7 @@ export function AccountCard({
                 aria-label="剩余额度"
               >
                 <div
-                  className={cn(
-                    "h-full rounded-full transition-[width] duration-500",
-                    expired ? "bg-destructive/60" : expiringSoon ? "bg-amber-500" : "bg-gradient-to-r from-primary/75 to-primary",
-                  )}
+                  className={cn("h-full rounded-full transition-[width] duration-500", barTone)}
                   style={{ width: `${clampedPercent > 0 ? Math.max(2, clampedPercent) : 0}%` }}
                 />
               </div>

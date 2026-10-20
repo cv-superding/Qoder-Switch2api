@@ -177,6 +177,20 @@ export default function SettingsPage() {
               );
             })}
           </div>
+
+          <div className="mt-4 flex items-center justify-between gap-4 rounded-xl border border-border/70 bg-muted/15 px-4 py-3">
+            <div>
+              <div className="text-[12.5px] font-medium">关闭窗口时最小化到托盘</div>
+              <p className="mt-0.5 text-[10.5px] text-muted-foreground">
+                桌面版关闭窗口后继续在系统托盘运行，反代与自动签到保持可用；从托盘菜单可退出。
+              </p>
+            </div>
+            <Switch
+              checked={settings.closeToTray}
+              onCheckedChange={(v) => setSettings({ ...settings, closeToTray: v })}
+              aria-label="关闭窗口时最小化到托盘"
+            />
+          </div>
         </SectionCard>
 
         <SectionCard

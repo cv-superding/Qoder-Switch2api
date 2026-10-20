@@ -41,6 +41,8 @@ impl Default for ProxyConfig {
 pub struct Settings {
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
     #[serde(default)]
     pub client_dir_overrides: std::collections::HashMap<String, String>,
     #[serde(default)]
@@ -55,6 +57,10 @@ pub struct Settings {
 
 fn default_theme() -> String {
     "light".into()
+}
+
+fn default_close_to_tray() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +83,7 @@ impl Default for Settings {
         proxy.insert("international".into(), ProxyConfig { enabled: false, listen: "127.0.0.1:7892".into(), ..Default::default() });
         Settings {
             theme: "light".into(),
+            close_to_tray: true,
             client_dir_overrides: Default::default(),
             client_exe_paths: Default::default(),
             auto_checkin: AutoCheckin { enabled: false, hour: 9 },

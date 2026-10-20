@@ -403,6 +403,7 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
     const settings = getSettings();
     const incoming = req.body?.settings || {};
     if (incoming.theme) settings.theme = ["light", "dark", "system"].includes(incoming.theme) ? incoming.theme : settings.theme;
+    if (typeof incoming.closeToTray === "boolean") settings.closeToTray = incoming.closeToTray;
     if (incoming.clientDirOverrides) {
       settings.clientDirOverrides = {
         domestic: String(incoming.clientDirOverrides.domestic || ""),

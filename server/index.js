@@ -27,6 +27,7 @@ const WEB_PORT = Number(process.env.QODER_SWITCH_PORT || 8787);
 function defaultSettings() {
   return {
     theme: "light",
+    closeToTray: true,
     clientDirOverrides: { domestic: "", international: "" },
     clientExePaths: { domestic: "", international: "" },
     autoCheckin: { enabled: false, hour: 9 },

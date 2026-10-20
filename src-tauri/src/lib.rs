@@ -31,13 +31,23 @@ use axum::{
 };
 use rust_embed::RustEmbed;
 use serde::Serialize;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 
 use crate::api::create_api_router;
 use crate::gateway::create_gateway;
 pub use crate::state::{AppState, ProxyConfig};
 
 pub const WEB_PORT: u16 = 8787;
+
+/// 关闭窗口时是否隐藏到托盘（可在设置中修改）
+pub static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
+/// 托盘创建成功后才允许隐藏窗口，避免托盘创建失败时窗口无法找回
+static TRAY_READY: AtomicBool = AtomicBool::new(false);
 
 /// 实际绑定的 Web 端口（8787 被占用时自动顺延），以及就绪标志
 pub static WEB_PORT_ACTUAL: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(WEB_PORT);
@@ -328,9 +338,23 @@ async fn run_checkin_all(state: &Arc<AppState>) {
     }
 }
 
+fn show_main_window<R: tauri::Runtime, M: Manager<R>>(manager: &M) {
+    if let Some(window) = manager.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = AppState::new();
+    let close_to_tray = state
+        .settings
+        .try_read()
+        .map(|settings| settings.close_to_tray)
+        .unwrap_or(true);
+    CLOSE_TO_TRAY.store(close_to_tray, Ordering::SeqCst);
     let state_for_server = state.clone();
     let state_for_checkin = state.clone();
 
@@ -362,8 +386,57 @@ pub fn run() {
                 .min_inner_size(900.0, 600.0)
                 .center()
                 .build();
-            if let Err(e) = window {
-                eprintln!("创建窗口失败: {}", e);
+            match window {
+                Ok(window) => {
+                    let win = window.clone();
+                    window.on_window_event(move |event| {
+                        if let WindowEvent::CloseRequested { api, .. } = event {
+                            if CLOSE_TO_TRAY.load(Ordering::SeqCst) && TRAY_READY.load(Ordering::SeqCst) {
+                                // 关闭窗口 = 收进托盘，Web 服务与反代继续运行
+                                api.prevent_close();
+                                let _ = win.hide();
+                            }
+                        }
+                    });
+                }
+                Err(e) => eprintln!("创建窗口失败: {}", e),
+            }
+
+            // 系统托盘：显示主窗口 / 退出
+            let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>);
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>);
+            if let (Ok(show_item), Ok(quit_item)) = (show_item, quit_item) {
+                if let Ok(menu) = Menu::with_items(app, &[&show_item, &quit_item]) {
+                    let mut tray = TrayIconBuilder::with_id("main")
+                        .menu(&menu)
+                        .tooltip("Qoder-Switch2api")
+                        .show_menu_on_left_click(false)
+                        .on_menu_event(|app, event| match event.id.as_ref() {
+                            "show" => show_main_window(app),
+                            "quit" => app.exit(0),
+                            _ => {}
+                        })
+                        .on_tray_icon_event(|tray, event| {
+                            if let TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } = event
+                            {
+                                show_main_window(tray.app_handle());
+                            }
+                        });
+                    if let Some(icon) = app.default_window_icon().cloned() {
+                        tray = tray.icon(icon);
+                    }
+                    match tray.build(app) {
+                        Ok(_) => TRAY_READY.store(true, Ordering::SeqCst),
+                        Err(e) => {
+                            TRAY_READY.store(false, Ordering::SeqCst);
+                            eprintln!("创建系统托盘失败: {}", e);
+                        }
+                    }
+                }
             }
             let _ = handle;
             Ok(())

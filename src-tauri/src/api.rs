@@ -752,6 +752,10 @@ async fn save_settings(State(state): State<Arc<AppState>>, Json(body): Json<Valu
             settings.theme = theme.to_string();
         }
     }
+    if let Some(close_to_tray) = incoming.get("closeToTray").and_then(|v| v.as_bool()) {
+        settings.close_to_tray = close_to_tray;
+        crate::CLOSE_TO_TRAY.store(close_to_tray, std::sync::atomic::Ordering::SeqCst);
+    }
     if let Some(v) = incoming.get("clientDirOverrides").and_then(|v| v.as_object()) {
         settings.client_dir_overrides.clear();
         for (key, value) in v {
