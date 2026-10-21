@@ -12,7 +12,8 @@
  */
 import express from "express";
 import { accountManager } from "../qoder/account.js";
-import { streamChat, normalizeModelKey } from "../qoder/chat.js";
+import { streamChat } from "../qoder/chat.js";
+import { resolveModelRequest } from "./models.js";
 import { fetchModelList } from "../qoder/info.js";
 import { recordUsage, usageStats } from "./usage.js";
 import { loadJson, saveJson } from "../store.js";
@@ -31,6 +32,19 @@ export function createGateway(edition, getProxyConfig) {
   const app = express();
   app.use(express.json({ limit: "32mb" }));
   app.use(express.text({ limit: "32mb", type: ["text/*"] }));
+
+  /* ---------------- CORS ---------------- */
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-request-id",
+    );
+    res.setHeader("Access-Control-Max-Age", "86400");
+    if (req.method === "OPTIONS") return res.status(204).end();
+    next();
+  });
 
   /* ---------------- 鉴权 ---------------- */
   app.use((req, res, next) => {
@@ -90,6 +104,23 @@ export function createGateway(edition, getProxyConfig) {
         owned_by: m.ownedBy || "qoder",
         display_name: m.displayName || m.id,
       })),
+    });
+  });
+
+  /* ---------------- Anthropic token 计数 ---------------- */
+  app.post("/v1/messages/count_tokens", (req, res) => {
+    let body = req.body || {};
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        return res.status(400).json(anthropicError("invalid_request_error", "请求体不是合法 JSON", 400));
+      }
+    }
+    const messages = anthropicToMessages(body);
+    const extras = JSON.stringify(body.system ?? "") + JSON.stringify(body.tools ?? []);
+    res.json({
+      input_tokens: estimateTokens(messages) + Math.ceil(extras.length / 4),
     });
   });
 
@@ -460,6 +491,8 @@ export function createGateway(edition, getProxyConfig) {
 
 async function runWithAccount(edition, model, req) {
   const editionValue = edition.value;
+  const { key: upstreamModel, effort: modelEffort } = resolveModelRequest(model);
+  const reasoningEffort = req.reasoningEffort || modelEffort;
   const maxAttempts = 3;
   let lastError = "没有可用账号";
   let lastStatus = 503;
@@ -484,11 +517,12 @@ async function runWithAccount(edition, model, req) {
       for await (const event of streamChat({
         account,
         edition,
-        model: normalizeModelKey(model),
+        model: upstreamModel,
         messages: req.messages,
         tools: req.tools,
         imageUrls: req.imageUrls,
         api: req.api,
+        reasoningEffort,
       })) {
         if (event.type === "error") {
           failed = event.error;
@@ -522,11 +556,12 @@ async function runWithAccount(edition, model, req) {
           for await (const event of streamChat({
             account: accountManager.get(account.id),
             edition,
-            model: normalizeModelKey(model),
+            model: upstreamModel,
             messages: req.messages,
             tools: req.tools,
             imageUrls: req.imageUrls,
             api: req.api,
+            reasoningEffort,
           })) {
             if (event.type === "error") {
               retryFailed = event.error;

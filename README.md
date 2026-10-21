@@ -172,6 +172,15 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 更新日志
 
+### v1.1.17
+
+- 模型名自动映射：支持客户端发送 `DeepSeek-Flash`、`Qwen3.8-Max`、`qoder/...` 等显示名/别名，自动转换为上游 model key，避免 400
+- 支持模型名附带 effort 后缀（如 `DeepSeek-Flash Low`、`Qwen3.8-Max High`），自动拆分模型与推理档位
+- 选号策略修复：只在剩余额度最高的同级账号之间轮转，不再让余额低的账号抢走请求
+- 反代网关补齐 CORS 预检，浏览器类客户端可直接调用
+- 新增 Anthropic `/v1/messages/count_tokens`，兼容 Claude Code 的上下文计数请求
+- Node 与 Rust 后端同步实现，并补充 Rust 模型别名单元测试
+
 ### v1.1.16
 
 - 修复 npm 11 生成的锁文件与 CI 的 npm 10 不兼容，确保应用内更新版本可以正常发布构建

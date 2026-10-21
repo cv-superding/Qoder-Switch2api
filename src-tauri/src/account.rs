@@ -713,11 +713,14 @@ impl AccountManager {
             .entry(edition_value.to_string())
             .or_insert_with(|| AtomicUsize::new(0))
             .fetch_add(1, Ordering::SeqCst);
-        let chosen = if sorted.len() > 1 {
-            sorted[idx % sorted.len()].clone()
-        } else {
-            sorted[0].clone()
-        };
+        // 只在「剩余额度最高」的同级账号之间轮转，避免空号抢走请求
+        let top_score = quota_score(&sorted[0]);
+        let tier: Vec<Account> = sorted
+            .iter()
+            .filter(|a| (quota_score(a) - top_score).abs() < 1e-9)
+            .cloned()
+            .collect();
+        let chosen = tier[idx % tier.len()].clone();
         let id = chosen.id.clone();
         if let Some(a) = self.accounts.iter_mut().find(|a| a.id == id) {
             a.last_used_at = Some(now_ms());

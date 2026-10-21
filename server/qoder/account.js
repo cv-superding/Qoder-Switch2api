@@ -243,10 +243,12 @@ class AccountManager {
     const usable = candidates.filter((a) => !a.tokenExpireAt || a.tokenExpireAt > now || a.refreshToken);
     const pool = usable.length > 0 ? usable : candidates;
     pool.sort((a, b) => quotaScore(b) - quotaScore(a) || (a.lastUsedAt || 0) - (b.lastUsedAt || 0));
-    const top = pool[0];
+    // 只在「剩余额度最高」的同级账号之间轮转，避免空号抢走请求
+    const topScore = quotaScore(pool[0]);
+    const tier = pool.filter((a) => Math.abs(quotaScore(a) - topScore) < 1e-9);
     const idx = this.rr[edition] || 0;
-    const chosen = pool.length > 1 ? pool[idx % pool.length] : top;
-    this.rr[edition] = (idx + 1) % Math.max(pool.length, 1);
+    const chosen = tier[idx % tier.length];
+    this.rr[edition] = (idx + 1) % Math.max(tier.length, 1);
     chosen.lastUsedAt = Date.now();
     return chosen;
   }

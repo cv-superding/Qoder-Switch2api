@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::chat::TokenUsage;
 use crate::chat::{normalize_model_key, stream_chat, ChatEvent, ChatRequest};
@@ -29,11 +30,18 @@ pub fn create_gateway(edition_value: &str, state: Arc<AppState>) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/responses", post(responses))
         .route("/v1/messages", post(messages))
+        .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/usage-stats", get(usage_stats_handler))
         .layer(axum::middleware::from_fn_with_state(
             (state.clone(), edition_value.clone()),
             auth_middleware,
         ))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state((state, edition_value))
 }
 
@@ -186,6 +194,76 @@ fn account_display_name(account: &crate::account::Account) -> String {
     "未知账号".to_string()
 }
 
+fn alias_key(raw: &str) -> Option<&'static str> {
+    let value = raw.trim().to_ascii_lowercase();
+    let exact = match value.as_str() {
+        "auto" => "auto",
+        "lite" => "lite",
+        "qmodel_38max" => "qmodel_38max",
+        "qfmodel" => "qfmodel",
+        "qmodel_latest" => "qmodel_latest",
+        "qmodel" => "qmodel",
+        "q37fmodel" => "q37fmodel",
+        "dmodel" => "dmodel",
+        "dfmodel" => "dfmodel",
+        "gmodel" => "gmodel",
+        "gfmodel" => "gfmodel",
+        "gm51model" => "gm51model",
+        "kmodel_latest" => "kmodel_latest",
+        "kmodel" => "kmodel",
+        "mmodel" => "mmodel",
+        _ => "",
+    };
+    if !exact.is_empty() {
+        return Some(exact);
+    }
+    let normalized = value
+        .trim_start_matches("qoder/")
+        .trim_start_matches("qoder:")
+        .trim_start_matches("qoder-")
+        .replace([' ', '_'], "-");
+    match normalized.as_str() {
+        "qwen3.8-max" | "qwen-3.8-max" | "qwen38max" => Some("qmodel_38max"),
+        "qwen3.8-flash" | "qwen-3.8-flash" => Some("qfmodel"),
+        "qwen3.7-max" | "qwen-3.7-max" => Some("qmodel_latest"),
+        "qwen3.7-plus" | "qwen-3.7-plus" => Some("qmodel"),
+        "qwen3.7-flash" | "qwen-3.7-flash" => Some("q37fmodel"),
+        "deepseek-v4-pro" | "deepseek-4-pro" | "deepseek-v4" | "deepseek-pro" => Some("dmodel"),
+        "deepseek-flash" | "deepseek-chat" | "deepseek-v3" => Some("dfmodel"),
+        "glm-5.3" | "glm5.3" => Some("gmodel"),
+        "glm-5.3-flash" | "glm5.3-flash" => Some("gfmodel"),
+        "glm-5.2" | "glm5.2" => Some("gm51model"),
+        "kimi-k3" => Some("kmodel_latest"),
+        "kimi-k2.8-preview" | "kimi-k2.8" => Some("kmodel"),
+        "minimax-m3.1-flash" | "minimax" => Some("mmodel"),
+        _ => None,
+    }
+}
+
+/// 客户端常发 display name 或带 effort 后缀，上游需要 model key
+fn resolve_model_request(raw: &str) -> (String, Option<String>) {
+    let value = raw.trim();
+    if value.is_empty() {
+        return ("auto".into(), None);
+    }
+    if let Some(key) = alias_key(value) {
+        return (key.into(), None);
+    }
+    let lower = value.to_ascii_lowercase();
+    for suffix in ["xhigh", "high", "medium", "low", "max"] {
+        for separator in [' ', '-', '_'] {
+            let pattern = format!("{}{}", separator, suffix);
+            if let Some(base) = lower.strip_suffix(&pattern) {
+                if let Some(key) = alias_key(base) {
+                    let effort = if suffix == "xhigh" { "xhigh" } else { suffix };
+                    return (key.into(), Some(effort.into()));
+                }
+            }
+        }
+    }
+    (value.to_string(), None)
+}
+
 /// 带轮转和重试的上游调用
 async fn run_with_account(
     state: &Arc<AppState>,
@@ -203,6 +281,8 @@ async fn run_with_account(
     let mut last_error = "没有可用账号".to_string();
     let mut last_status = StatusCode::SERVICE_UNAVAILABLE;
     let mut last_account: Option<(String, String)> = None;
+    let (upstream_model, suffix_effort) = resolve_model_request(model);
+    let effective_effort = reasoning_effort.clone().or(suffix_effort);
 
     for attempt in 0..max_attempts {
         let (edition, account) = {
@@ -248,10 +328,10 @@ async fn run_with_account(
 
         let req = ChatRequest {
             account: account.clone(),
-            model: model.to_string(),
+            model: upstream_model.clone(),
             messages: req_messages.to_vec(),
             tools: tools.clone(),
-            reasoning_effort: reasoning_effort.clone(),
+            reasoning_effort: effective_effort.clone(),
             thinking_type: thinking_type.clone(),
             thinking_budget,
             image_urls: image_urls.clone(),
@@ -307,10 +387,10 @@ async fn run_with_account(
                         let account2 = state.accounts.read().await.get(&account.id).cloned().unwrap();
                         let req = ChatRequest {
                             account: account2.clone(),
-                            model: model.to_string(),
+                            model: upstream_model.clone(),
                             messages: req_messages.to_vec(),
                             tools: tools.clone(),
-                            reasoning_effort: reasoning_effort.clone(),
+                            reasoning_effort: effective_effort.clone(),
                             thinking_type: thinking_type.clone(),
                             thinking_budget,
                             image_urls: image_urls.clone(),
@@ -798,6 +878,18 @@ async fn responses(
 
 /* ---------------- Messages（Anthropic） ---------------- */
 
+async fn count_tokens(Json(body): Json<Value>) -> Response {
+    let messages = anthropic_to_messages(&body);
+    let mut tokens = estimate_tokens(&messages);
+    let extras = format!(
+        "{}{}",
+        body.get("system").map(|v| v.to_string()).unwrap_or_default(),
+        body.get("tools").map(|v| v.to_string()).unwrap_or_default()
+    );
+    tokens += (extras.chars().count() / 4) as i64;
+    Json(json!({ "input_tokens": tokens })).into_response()
+}
+
 async fn messages(
     State((state, edition_value)): State<(Arc<AppState>, String)>,
     Json(body): Json<Value>,
@@ -1129,4 +1221,25 @@ fn safe_json(raw: &str) -> Value {
 
 fn uuid_simple() -> String {
     crate::crypto::uuid().replace('-', "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_model_request;
+
+    #[test]
+    fn resolves_display_names_and_effort_suffixes() {
+        assert_eq!(resolve_model_request("DeepSeek-Flash Low"), ("dfmodel".into(), Some("low".into())));
+        assert_eq!(resolve_model_request("DeepSeek-Flash"), ("dfmodel".into(), None));
+        assert_eq!(resolve_model_request("DeepSeek-V4-Pro"), ("dmodel".into(), None));
+        assert_eq!(resolve_model_request("Qwen3.8-Max"), ("qmodel_38max".into(), None));
+        assert_eq!(resolve_model_request("Qwen3.8-Max High"), ("qmodel_38max".into(), Some("high".into())));
+        assert_eq!(resolve_model_request("qoder/DeepSeek-Flash"), ("dfmodel".into(), None));
+        assert_eq!(resolve_model_request("glm-5.3-flash"), ("gfmodel".into(), None));
+    }
+
+    #[test]
+    fn keeps_unknown_models_unchanged() {
+        assert_eq!(resolve_model_request("my-custom-model"), ("my-custom-model".into(), None));
+    }
 }

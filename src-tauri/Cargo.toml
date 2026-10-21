@@ -1,6 +1,6 @@
 [package]
 name = "qoder-switch2api"
-version = "1.1.16"
+version = "1.1.17"
 description = "Qoder 多账号切换 + OpenAI/Anthropic 兼容反代（国内版 Qoder CN / 国际版）"
 authors = ["qoder-switch2api"]
 license = "MIT"
@@ -26,7 +26,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
