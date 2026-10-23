@@ -48,14 +48,21 @@ fn auth_header(account: &Account) -> String {
 
 fn json_ms(value: Option<&Value>) -> Option<i64> {
     let value = value?;
-    if let Some(n) = value.as_i64() {
-        return Some(if n < 1_000_000_000_000 { n * 1000 } else { n });
+    let ms = if let Some(n) = value.as_i64() {
+        if n < 1_000_000_000_000 { n * 1000 } else { n }
+    } else {
+        value.as_str().and_then(|raw| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .map(|date| date.timestamp_millis())
+        })?
+    };
+    // 0 / 负数 / 9999-12-31 都表示「永不过期」
+    if ms <= 0 || ms >= 4_102_444_800_000 {
+        None
+    } else {
+        Some(ms)
     }
-    value.as_str().and_then(|raw| {
-        chrono::DateTime::parse_from_rfc3339(raw)
-            .ok()
-            .map(|date| date.timestamp_millis())
-    })
 }
 
 async fn get_json(edition: &Edition, account: &Account, path: &str) -> Result<Value, String> {
@@ -63,6 +70,10 @@ async fn get_json(edition: &Edition, account: &Account, path: &str) -> Result<Va
         .get(open_api(edition, path))
         .header("Authorization", auth_header(account))
         .header("Accept", "application/json")
+        // campaigns 缺少 Cosy 身份头会静默返回空活动列表
+        .header("User-Agent", "Qoder")
+        .header("Cosy-ClientType", "10")
+        .header("Cosy-Version", "0.4.3")
         .send()
         .await
         .map_err(|e| format!("请求失败: {}", e))?;
@@ -173,12 +184,18 @@ pub async fn get_me_usage(edition: &Edition, account: &Account) -> Option<Value>
 }
 
 pub async fn list_campaigns(edition: &Edition, account: &Account) -> Result<Vec<Value>, String> {
-    let data = get_json(edition, account, &edition.oauth.campaigns_path).await?;
+    let sep = if edition.oauth.campaigns_path.contains('?') { "&" } else { "?" };
+    let path = format!("{}{}forceRefresh=true", edition.oauth.campaigns_path, sep);
+    let data = get_json(edition, account, &path).await?;
     Ok(match &data {
         Value::Array(arr) => arr.clone(),
         Value::Object(obj) => obj
             .get("campaigns")
-            .or_else(|| obj.get("data"))
+            .or_else(|| {
+                obj.get("data")
+                    .and_then(|d| d.get("campaigns"))
+                    .or_else(|| obj.get("data"))
+            })
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default(),
@@ -210,20 +227,37 @@ fn campaign_amount(c: &Value) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// 积分类活动：新版带 benefit.kind=CREDITS，部分老活动 kind 为空
-fn is_credit_campaign(c: &Value) -> bool {
-    let kind = c
-        .get("benefit")
+fn campaign_kind(c: &Value) -> String {
+    c.get("benefit")
         .and_then(|b| b.get("kind"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim()
-        .to_ascii_uppercase();
+        .to_ascii_uppercase()
+}
+
+/// 积分类活动：新版带 benefit.kind=CREDITS，部分老活动 kind 为空
+fn is_credit_campaign(c: &Value) -> bool {
+    let kind = campaign_kind(c);
     kind.is_empty() || kind == "CREDITS"
+}
+
+/// 活动时间窗（上游是秒级时间戳）
+fn campaign_active(c: &Value, now_secs: i64) -> bool {
+    let start_at = c.get("startAt").and_then(|v| v.as_i64()).unwrap_or(0);
+    let end_at = c.get("endAt").and_then(|v| v.as_i64()).unwrap_or(0);
+    if start_at > 0 && now_secs < start_at {
+        return false;
+    }
+    if end_at > 0 && now_secs > end_at {
+        return false;
+    }
+    true
 }
 
 /// 可领取的签到活动（可同时存在多个）
 pub fn find_claimable_checkins(campaigns: &[Value]) -> Vec<Value> {
+    let now_secs = chrono::Utc::now().timestamp();
     campaigns
         .iter()
         .filter(|c| {
@@ -231,11 +265,13 @@ pub fn find_claimable_checkins(campaigns: &[Value]) -> Vec<Value> {
             campaign_status(c) == "CLAIMABLE"
                 && (action.is_empty() || action == "CLAIM_BENEFIT")
                 && is_credit_campaign(c)
+                && campaign_active(c, now_secs)
         })
         .filter_map(|c| {
             let id = c
                 .get("id")
                 .or_else(|| c.get("campaignId"))
+                .or_else(|| c.get("campaign_id"))
                 .and_then(|v| v.as_str())?;
             Some(json!({
                 "id": id,
@@ -250,12 +286,18 @@ pub fn find_claimable_checkin(campaigns: &[Value]) -> Option<Value> {
     find_claimable_checkins(campaigns).into_iter().next()
 }
 
-/// 今日是否已签到：只认积分类活动的 CLAIMED / REPLAYED
+/// 今日是否已签到：只认签到类（CLAIM_BENEFIT）活动，VIEW_DETAILS 营销活动不算
 pub fn today_checked_in(campaigns: &[Value]) -> bool {
     campaigns.iter().any(|c| {
         let status = campaign_status(c);
-        (status == "CLAIMED" || status == "REPLAYED")
-            && (is_credit_campaign(c) || campaign_amount(c) > 0.0)
+        if status != "CLAIMED" && status != "REPLAYED" {
+            return false;
+        }
+        let action = campaign_action(c);
+        if action == "CLAIM_BENEFIT" {
+            return true;
+        }
+        action.is_empty() && campaign_kind(c) == "CREDITS"
     })
 }
 
@@ -269,23 +311,73 @@ pub async fn claim_campaign(edition: &Edition, account: &Account, campaign_id: &
     let resp = crate::http::client()
         .post(&url)
         .header("Authorization", auth_header(account))
+        .header("Accept", "application/json")
+        .header("User-Agent", "Qoder")
+        .header("Cosy-ClientType", "10")
+        .header("Cosy-Version", "0.4.3")
+        .header("Content-Type", "application/json")
+        .body("{}")
         .send()
         .await
         .map_err(|e| format!("领取失败: {}", e))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>()));
-    }
     let data: Value = if text.trim().is_empty() {
         Value::Null
     } else {
         serde_json::from_str(&text).unwrap_or(Value::Null)
     };
+    let body = data.get("data").filter(|v| v.is_object()).unwrap_or(&data);
+    let failure_code = body
+        .get("failureCode")
+        .or_else(|| body.get("failure_code"))
+        .or_else(|| body.get("errorCode"))
+        .or_else(|| data.get("failureCode"))
+        .or_else(|| data.get("errorCode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    let replayed_already = |code: &str| {
+        code == "SAME_PERSON_ALREADY_CLAIMED" || code == "ALREADY_CLAIMED" || code == "REPLAYED"
+    };
+    if !status.is_success() {
+        if status.as_u16() == 409 && replayed_already(&failure_code) {
+            return Ok(json!({ "success": true, "replayed": true, "rewardCredit": Value::Null }));
+        }
+        return Err(format!("HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>()));
+    }
+    if !failure_code.is_empty() {
+        if replayed_already(&failure_code) {
+            return Ok(json!({ "success": true, "replayed": true, "rewardCredit": Value::Null }));
+        }
+        let message = match failure_code.as_str() {
+            "REDEMPTION_CODE_OUT_OF_STOCK" => "今日奖励已被领完",
+            "ACHIEVEMENT_NOT_COMPLETED" => "活动条件未完成",
+            "CAMPAIGN_NOT_ACTIVE" => "活动未开始或已结束",
+            "RISK_BLOCKED" => "风控拦截，请稍后再试",
+            "RISK_DEPENDENCY_UNAVAILABLE" => "风控服务暂不可用，请稍后再试",
+            _ => "活动暂不可领取，请稍后再试",
+        };
+        return Err(message.to_string());
+    }
+    let claim_status = body.get("status").and_then(|v| v.as_str()).unwrap_or("").to_ascii_uppercase();
+    if claim_status == "BLOCKED" {
+        return Err("活动暂不可领取，请稍后再试".into());
+    }
+    let replayed = body.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false)
+        || data.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let reward = body
+        .get("benefit")
+        .and_then(|b| b.get("amount"))
+        .and_then(|v| v.as_f64())
+        .or_else(|| body.get("rewardCredit").and_then(|v| v.as_f64()))
+        .or_else(|| body.get("credit").and_then(|v| v.as_f64()))
+        .filter(|v| *v > 0.0);
     Ok(json!({
         "success": true,
-        "replayed": data.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false),
-        "rewardCredit": data.get("rewardCredit").or_else(|| data.get("credit")).and_then(|v| v.as_f64())
+        "replayed": replayed,
+        "rewardCredit": reward
     }))
 }
 
@@ -380,4 +472,58 @@ fn normalize_model(m: &Value) -> Option<Value> {
         "isReasoning": m.get("is_reasoning").and_then(|v| v.as_bool()).unwrap_or(false),
         "isVl": m.get("is_vl").and_then(|v| v.as_bool()).unwrap_or(false)
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_details_rows_do_not_count_as_checkin() {
+        let campaigns = vec![json!({
+            "campaignId": "mkt",
+            "actionType": "VIEW_DETAILS",
+            "claimStatus": "CLAIMED"
+        })];
+        assert!(!today_checked_in(&campaigns));
+    }
+
+    #[test]
+    fn claimed_benefit_row_counts_as_checkin() {
+        let campaigns = vec![json!({
+            "campaignId": "daily",
+            "actionType": "CLAIM_BENEFIT",
+            "claimStatus": "CLAIMED",
+            "benefit": { "kind": "CREDITS", "amount": 100 }
+        })];
+        assert!(today_checked_in(&campaigns));
+    }
+
+    #[test]
+    fn claimable_rows_ignore_inactive_window() {
+        let past = json!({
+            "campaignId": "past",
+            "actionType": "CLAIM_BENEFIT",
+            "claimStatus": "CLAIMABLE",
+            "startAt": 1_000,
+            "endAt": 2_000,
+            "benefit": { "kind": "CREDITS", "amount": 100 }
+        });
+        let active = json!({
+            "campaignId": "active",
+            "actionType": "CLAIM_BENEFIT",
+            "claimStatus": "CLAIMABLE",
+            "benefit": { "kind": "CREDITS", "amount": 100 }
+        });
+        let rows = find_claimable_checkins(&[past, active]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id").and_then(|v| v.as_str()), Some("active"));
+    }
+
+    #[test]
+    fn permanent_expiry_is_normalized_to_none() {
+        assert_eq!(json_ms(Some(&json!(253_402_214_400_000_i64))), None);
+        assert_eq!(json_ms(Some(&json!(0))), None);
+        assert_eq!(json_ms(Some(&json!(1_792_724_800_000_i64))), Some(1_792_724_800_000));
+    }
 }

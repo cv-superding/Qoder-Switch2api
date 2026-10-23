@@ -215,7 +215,15 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
       ]);
       if (usage.error) return res.status(502).json({ error: usage.error });
       accountManager.update(account.id, {
-        quota: usage.quota ? { ...usage.quota, expiresAt: usage.expiresAt, updatedAt: Date.now() } : null,
+        quota: usage.quota
+          ? {
+              ...usage.quota,
+              expiresAt: usage.expiresAt,
+              isQuotaExceeded: usage.isQuotaExceeded,
+              totalUsagePercentage: usage.totalUsagePercentage,
+              updatedAt: Date.now(),
+            }
+          : null,
         plan: plan || account.plan,
         lastError: "",
       });
@@ -274,7 +282,9 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
         let anyReplayed = false;
         for (const claimable of claimables) {
           const claim = await info.claimCampaign(edition, account, claimable.id);
-          const credit = Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
+          const credit = claim.replayed
+            ? 0
+            : Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
           if (Number.isFinite(credit)) reward += credit;
           if (claim.replayed) anyReplayed = true;
           else anyClaimed = true;

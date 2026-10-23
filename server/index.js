@@ -195,7 +195,9 @@ async function runAutoCheckin(force = false) {
       let reward = 0;
       for (const claimable of claimables) {
         const claim = await info.claimCampaign(edition, full, claimable.id);
-        const credit = Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
+        const credit = claim.replayed
+          ? 0
+          : Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
         if (Number.isFinite(credit)) reward += credit;
       }
       appendJsonl("checkin.jsonl", {

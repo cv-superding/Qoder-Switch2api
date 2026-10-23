@@ -44,6 +44,8 @@ export interface Account {
     unit: string;
     expiresAt: number | null;
     updatedAt: number;
+    isQuotaExceeded?: boolean;
+    totalUsagePercentage?: number | null;
     plan?: QuotaPart | null;
     addOn?: QuotaPart | null;
   } | null;

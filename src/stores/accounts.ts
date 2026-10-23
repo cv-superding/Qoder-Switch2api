@@ -94,7 +94,13 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
                   ...a,
                   plan: entry.plan ?? a.plan,
                   quota: entry.usage.quota
-                    ? { ...entry.usage.quota, expiresAt: entry.usage.expiresAt, updatedAt: Date.now() }
+                    ? {
+                        ...entry.usage.quota,
+                        expiresAt: entry.usage.expiresAt,
+                        isQuotaExceeded: entry.usage.isQuotaExceeded,
+                        totalUsagePercentage: entry.usage.totalUsagePercentage,
+                        updatedAt: Date.now(),
+                      }
                     : a.quota,
                 }
               : a,
@@ -136,7 +142,13 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
                     ...a,
                     plan: entry.plan ?? a.plan,
                     quota: entry.usage.quota
-                      ? { ...entry.usage.quota, expiresAt: entry.usage.expiresAt, updatedAt: Date.now() }
+                      ? {
+                          ...entry.usage.quota,
+                          expiresAt: entry.usage.expiresAt,
+                          isQuotaExceeded: entry.usage.isQuotaExceeded,
+                          totalUsagePercentage: entry.usage.totalUsagePercentage,
+                          updatedAt: Date.now(),
+                        }
                       : a.quota,
                   }
                 : a,

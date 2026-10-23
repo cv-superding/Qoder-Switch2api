@@ -13,6 +13,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { QoderCnMark, QoderMark } from "@/components/product-marks";
 import { cn } from "@/lib/utils";
+import { hasQuotaData, isPermanentExpiry, remainingPercent } from "@/lib/quota";
 import { accountGroupLabel, isInternational, type Account, type CheckinState, type QuotaInfo } from "@/lib/types";
 
 const AVATAR_TONES = [
@@ -105,24 +106,20 @@ export function AccountCard({
   const updatedAt = quota?.updatedAt;
   const planPart = credit?.quota?.plan ?? quota?.plan ?? null;
   const addOnPart = credit?.quota?.addOn ?? quota?.addOn ?? null;
-  const expired = typeof expiresAt === "number" && expiresAt < Date.now();
-  const expiringSoon = typeof expiresAt === "number" && !expired && expiresAt - Date.now() < 7 * 86400000;
+  const quotaValue = credit?.quota ?? quota ?? null;
+  const permanent = isPermanentExpiry(expiresAt);
+  const hasQuota = hasQuotaData(quotaValue);
+  const expired = !permanent && typeof expiresAt === "number" && expiresAt < Date.now();
+  const expiringSoon = !permanent && typeof expiresAt === "number" && !expired && expiresAt - Date.now() < 7 * 86400000;
   const planTier = account.plan?.planTierName ?? "";
 
-  let percent: number | null = null;
-  if (remaining != null && total) {
-    percent = (remaining / total) * 100;
-  } else if (typeof credit?.quota?.percentage === "number") {
-    // 上游 percentage 是「已用比例」，展示需要换算成剩余
-    const used = credit.quota.percentage <= 1 ? credit.quota.percentage : credit.quota.percentage / 100;
-    percent = (1 - used) * 100;
-  }
+  const percent = remainingPercent(quotaValue);
   const clampedPercent = percent == null ? 0 : Math.min(100, Math.max(0, percent));
   // 进度条表示剩余额度，不表示到期紧急程度；到期只通过右侧徽标提示
   const barTone = expired
     ? "bg-destructive/70"
     : percent == null
-      ? "bg-primary"
+      ? "bg-muted-foreground/30"
       : clampedPercent <= 10
         ? "bg-destructive/70"
         : clampedPercent <= 30
@@ -400,10 +397,16 @@ export function AccountCard({
                       ? "bg-destructive/10 text-destructive"
                       : expiringSoon
                         ? "bg-amber-500/10 text-amber-700 dark:text-amber-400"
-                        : "bg-primary/8 text-primary",
+                        : permanent
+                          ? "bg-muted text-muted-foreground"
+                          : "bg-primary/8 text-primary",
                   )}
                 >
-                  {expired ? "已过期" : expiresAt ? `剩余 ${Math.max(0, Math.ceil((expiresAt - Date.now()) / 86400000))} 天` : "长期有效"}
+                  {expired
+                    ? "已过期"
+                    : permanent
+                      ? "长期有效"
+                      : `剩余 ${Math.max(0, Math.ceil((expiresAt! - Date.now()) / 86400000))} 天`}
                 </span>
               </div>
 
@@ -436,14 +439,18 @@ export function AccountCard({
               <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[10.5px] text-muted-foreground">
                 <span className="flex min-w-0 items-center gap-1.5">
                   <Clock3 className="size-3 shrink-0" />
-                  <span className="truncate">{expiresAt ? `到期 ${new Date(expiresAt).toLocaleDateString("zh-CN")}` : "长期有效"}</span>
+                  <span className="truncate">
+                    {permanent ? "长期有效" : `到期 ${new Date(expiresAt!).toLocaleDateString("zh-CN")}`}
+                  </span>
                 </span>
                 <span className="truncate text-right">{updatedAt ? `${formatQuotaUpdatedAt(updatedAt)} 更新` : "未更新"}</span>
                 <span className="flex min-w-0 items-center gap-1.5">
                   <ArrowLeftRight className="size-3 shrink-0" />
                   <span className="truncate">切换于 {formatSwitchedAt(account.lastSwitchAt)}</span>
                 </span>
-                <span className="truncate text-right">{percent != null ? `剩余 ${Math.round(clampedPercent)}%` : "占比未知"}</span>
+                <span className="truncate text-right">
+                  {percent != null ? `剩余 ${Math.round(clampedPercent)}%` : hasQuota ? "占比未知" : "无可用额度"}
+                </span>
               </div>
               {quotaError}
             </>

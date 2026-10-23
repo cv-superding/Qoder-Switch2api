@@ -108,6 +108,9 @@ pub struct QuotaSnapshot {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub updated_at: Option<i64>,
+    /// 上游是否判定额度已用尽（Free 账号可能是 0/0）
+    #[serde(default)]
+    pub is_quota_exceeded: Option<bool>,
     /// 套餐额度与加油包明细（旧数据无此字段）
     #[serde(default)]
     pub plan: Option<QuotaPart>,

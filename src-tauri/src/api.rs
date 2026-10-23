@@ -310,6 +310,7 @@ async fn get_credit(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         let mut value = serde_json::to_value(q).unwrap_or_else(|_| json!({}));
         if let Some(obj) = value.as_object_mut() {
             obj.insert("expiresAt".into(), json!(usage.expires_at));
+            obj.insert("isQuotaExceeded".into(), json!(usage.is_quota_exceeded));
             obj.insert("updatedAt".into(), json!(crate::crypto::now_ms()));
         }
         value
@@ -435,15 +436,15 @@ async fn checkin_accounts(State(state): State<Arc<AppState>>, Json(body): Json<V
                     match info::claim_campaign(&edition, &account, campaign_id).await {
                         Ok(claim) => {
                             let replayed = claim.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false);
-                            reward += claim
-                                .get("rewardCredit")
-                                .and_then(|v| v.as_f64())
-                                .or_else(|| claimable.get("rewardCredit").and_then(|v| v.as_f64()))
-                                .unwrap_or(0.0);
                             if replayed {
                                 any_replayed = true;
                             } else {
                                 any_claimed = true;
+                                reward += claim
+                                    .get("rewardCredit")
+                                    .and_then(|v| v.as_f64())
+                                    .or_else(|| claimable.get("rewardCredit").and_then(|v| v.as_f64()))
+                                    .unwrap_or(0.0);
                             }
                         }
                         Err(e) => {

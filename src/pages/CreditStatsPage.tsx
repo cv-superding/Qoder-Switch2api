@@ -11,20 +11,21 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import * as api from "@/lib/api";
+import { hasQuotaData, isPermanentExpiry, remainingPercent } from "@/lib/quota";
 import type { Account, Edition, QuotaInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useAccountsStore } from "@/stores/accounts";
 
 function fmtDate(ts: number | null | undefined): string {
-  if (!ts) return "长期有效";
-  const d = new Date(ts);
+  if (isPermanentExpiry(ts)) return "长期有效";
+  const d = new Date(ts as number);
   if (Number.isNaN(d.getTime())) return "—";
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function daysLeft(ts: number | null | undefined): number | null {
-  if (!ts) return null;
-  return Math.ceil((ts - Date.now()) / 86400000);
+  if (isPermanentExpiry(ts)) return null;
+  return Math.ceil((ts! - Date.now()) / 86400000);
 }
 
 function fmtNum(value: number | null | undefined): string {
@@ -32,15 +33,8 @@ function fmtNum(value: number | null | undefined): string {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
 }
 
-function remainingPercent(account: Account, credit: QuotaInfo | undefined): number | null {
-  const q = credit?.quota ?? account.quota;
-  if (q?.remaining != null && q.total) return Math.min(100, Math.max(0, (q.remaining / q.total) * 100));
-  if (typeof q?.percentage === "number") {
-    // 上游 percentage 为「已用比例」
-    const used = q.percentage <= 1 ? q.percentage : q.percentage / 100;
-    return Math.min(100, Math.max(0, (1 - used) * 100));
-  }
-  return null;
+function accountRemainingPercent(account: Account, credit: QuotaInfo | undefined): number | null {
+  return remainingPercent(credit?.quota ?? account.quota);
 }
 
 /** 积分统计：各账号额度、到期、签到状态 */
@@ -187,10 +181,12 @@ export default function CreditStatsPage() {
                   const remaining = credit?.quota?.remaining ?? a.quota?.remaining ?? null;
                   const total = credit?.quota?.total ?? a.quota?.total ?? null;
                   const unit = credit?.quota?.unit || a.quota?.unit || "credits";
-                  const percent = remainingPercent(a, credit);
+                  const percent = accountRemainingPercent(a, credit);
                   const expireAt = credit?.expiresAt ?? a.quota?.expiresAt ?? null;
                   const planPart = credit?.quota?.plan ?? a.quota?.plan ?? null;
                   const addOnPart = credit?.quota?.addOn ?? a.quota?.addOn ?? null;
+                  const quotaData = hasQuotaData(credit?.quota ?? a.quota);
+                  const exhausted = Boolean(credit?.isQuotaExceeded ?? a.quota?.isQuotaExceeded) && quotaData && (remaining ?? 0) <= 0;
                   const left = daysLeft(expireAt);
                   const loading = creditLoadingMap[a.id];
                   const error = creditErrorMap[a.id];
@@ -260,6 +256,8 @@ export default function CreditStatsPage() {
                           <Badge variant="warning" className="h-5 text-[10px]">需重登录</Badge>
                         ) : a.cooling ? (
                           <Badge variant="secondary" className="h-5 text-[10px]">冷却中</Badge>
+                        ) : exhausted ? (
+                          <Badge variant="warning" className="h-5 text-[10px]">额度用尽</Badge>
                         ) : (
                           <Badge variant="success" className="h-5 text-[10px]">正常</Badge>
                         )}
