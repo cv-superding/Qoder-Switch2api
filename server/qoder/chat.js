@@ -386,19 +386,27 @@ async function* legacyStream(req) {
     method: "POST",
     headers,
     body: encoded,
-    timeoutMs: req.timeoutMs || 300000,
+    idleTimeoutMs: req.timeoutMs || 300000,
   });
+  let sawDone = false;
   try {
     for (;;) {
       const line = await sse.nextLine();
       if (line == null) break;
       const data = line.trim().startsWith("data:") ? line.trim().slice(5).trim() : null;
       if (!data) continue;
-      if (data === "[DONE]") break;
+      if (data === "[DONE]") {
+        sawDone = true;
+        break;
+      }
       const events = parseLegacyLine(data);
       if (events) {
         for (const event of events) yield event;
       }
+    }
+    if (!sawDone) {
+      yield { type: "error", error: "上游连接提前结束（未收到 [DONE]），响应可能不完整" };
+      return;
     }
     yield { type: "done" };
   } catch (e) {
@@ -502,7 +510,7 @@ class CloudSession {
     return openSse(`${this.baseUrl}/sessions/${sessionId}/events/stream`, {
       method: "GET",
       headers: { Authorization: `Bearer ${this.pat}` },
-      timeoutMs: timeoutMs || 300000,
+      idleTimeoutMs: timeoutMs || 300000,
     });
   }
 }
@@ -554,6 +562,7 @@ async function* cloudStream(req) {
   const sse = await session.openStream(sessionId, req.timeoutMs);
   let eventType = "";
   let dataLine = "";
+  let sawTerminal = false;
   try {
     for (;;) {
       const line = await sse.nextLine();
@@ -576,6 +585,7 @@ async function* cloudStream(req) {
           }
         }
         if (eventType === "session.status_idle" || eventType === "terminated") {
+          sawTerminal = true;
           yield { type: "done" };
           return;
         }
@@ -604,6 +614,10 @@ async function* cloudStream(req) {
         eventType = "";
         dataLine = "";
       }
+    }
+    if (!sawTerminal) {
+      yield { type: "error", error: "上游会话提前结束，响应可能不完整" };
+      return;
     }
     yield { type: "done" };
   } catch (e) {

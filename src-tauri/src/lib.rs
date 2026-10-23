@@ -291,8 +291,10 @@ async fn schedule_auto_checkin(state: Arc<AppState>) {
             let now = chrono::Local::now();
             let today = now.format("%Y-%m-%d").to_string();
             if now.hour() as i64 >= hour && last_day != today {
-                // 有账号失败时不盖章，10 分钟后的下一轮继续重试
-                if run_checkin_all(&state).await {
+                let (failed, pending) = run_checkin_all(&state).await;
+                // 失败不盖章；没有活动时最多重试到配置时间后 2 小时再收工
+                let grace = (hour + 2).min(23);
+                if !failed && (pending == 0 || now.hour() as i64 >= grace) {
                     last_day = today;
                 }
             }
@@ -301,41 +303,101 @@ async fn schedule_auto_checkin(state: Arc<AppState>) {
     }
 }
 
-/// 返回是否所有账号都处理成功；失败时调用方会在下一轮重试
-async fn run_checkin_all(state: &Arc<AppState>) -> bool {
+/// 返回 (是否有失败, 尚未出现活动/未确认的账号数)
+async fn run_checkin_all(state: &Arc<AppState>) -> (bool, usize) {
     use crate::info;
     use crate::store::append_jsonl;
     let accounts_snapshot = state.accounts.read().await.accounts.clone();
     let mut failed = false;
-    for account in accounts_snapshot {
+    let mut pending = 0usize;
+    for mut account in accounts_snapshot {
         if account.status == "disabled" {
             continue;
+        }
+        if account.security_oauth_token.is_empty() && account.pat.is_empty() {
+            continue;
+        }
+        if account.status == "needs_relogin"
+            && account.refresh_token.is_empty()
+            && account.pat.is_empty()
+        {
+            continue;
+        }
+        // 自动签到前先尝试续期，避免 token 过期导致每天重复失败
+        let expires_soon = account
+            .token_expire_at
+            .map(|t| t < crate::crypto::now_ms() + 60_000)
+            .unwrap_or(false);
+        if !account.refresh_token.is_empty() && (account.status == "needs_relogin" || expires_soon) {
+            if !crate::account::try_refresh_account(&state.accounts, &account.id).await {
+                continue;
+            }
+            if let Some(latest) = state.accounts.read().await.get(&account.id).cloned() {
+                account = latest;
+            }
         }
         let edition = state.effective_edition(&account.edition).await;
         match info::list_campaigns(&edition, &account).await {
             Ok(campaigns) => {
                 let claimables = info::find_claimable_checkins(&campaigns);
                 if claimables.is_empty() {
+                    if !info::today_checked_in(&campaigns) {
+                        pending += 1;
+                    }
                     continue;
                 }
+                let mut any_claimed = false;
+                let mut any_replayed = false;
+                let mut reward = 0.0_f64;
                 for claimable in &claimables {
                     let id = claimable.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    if let Err(e) = info::claim_campaign(&edition, &account, id).await {
-                        failed = true;
-                        append_jsonl(
-                            "checkin.jsonl",
-                            &serde_json::json!({ "accountId": account.id, "edition": account.edition, "result": "error", "auto": true, "error": e }),
-                        );
-                    } else {
-                        append_jsonl(
-                            "checkin.jsonl",
-                            &serde_json::json!({ "accountId": account.id, "edition": account.edition, "result": "success", "auto": true }),
-                        );
-                        println!("[auto-checkin] {} 签到成功", account.name);
+                    match info::claim_campaign(&edition, &account, id).await {
+                        Ok(claim) => {
+                            if claim.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                any_replayed = true;
+                                continue;
+                            }
+                            any_claimed = true;
+                            reward += claim
+                                .get("rewardCredit")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or_else(|| {
+                                    claimable.get("rewardCredit").and_then(|v| v.as_f64()).unwrap_or(0.0)
+                                });
+                        }
+                        Err(e) => {
+                            failed = true;
+                            append_jsonl(
+                                "checkin.jsonl",
+                                &serde_json::json!({ "accountId": account.id, "edition": account.edition, "result": "error", "auto": true, "error": e }),
+                            );
+                        }
                     }
+                }
+                if any_claimed || any_replayed {
+                    let result = if any_claimed { "success" } else { "already" };
+                    append_jsonl(
+                        "checkin.jsonl",
+                        &serde_json::json!({
+                            "accountId": account.id,
+                            "edition": account.edition,
+                            "result": result,
+                            "auto": true,
+                            "rewardCredit": if reward > 0.0 { Some(reward) } else { None }
+                        }),
+                    );
+                    println!(
+                        "[auto-checkin] {} {}",
+                        account.name,
+                        if any_claimed { "签到成功" } else { "今日已签到" }
+                    );
                 }
             }
             Err(e) => {
+                if e.contains("HTTP 404") {
+                    pending += 1;
+                    continue;
+                }
                 failed = true;
                 append_jsonl(
                     "checkin.jsonl",
@@ -344,7 +406,7 @@ async fn run_checkin_all(state: &Arc<AppState>) -> bool {
             }
         }
     }
-    !failed
+    (failed, pending)
 }
 
 fn show_main_window<R: tauri::Runtime, M: Manager<R>>(manager: &M) {

@@ -106,6 +106,8 @@ export function AccountCard({
   const updatedAt = quota?.updatedAt;
   const planPart = credit?.quota?.plan ?? quota?.plan ?? null;
   const addOnPart = credit?.quota?.addOn ?? quota?.addOn ?? null;
+  const packages = (credit?.quota?.packages ?? quota?.packages ?? []).filter((p) => p.available !== false);
+  const shared = credit?.quota?.shared ?? quota?.shared ?? null;
   const quotaValue = credit?.quota ?? quota ?? null;
   const permanent = isPermanentExpiry(expiresAt);
   const hasQuota = hasQuotaData(quotaValue);
@@ -424,15 +426,27 @@ export function AccountCard({
                 />
               </div>
 
-              {addOnPart ? (
+              {hasQuota && (planPart || addOnPart || packages.length > 0 || shared) ? (
                 <div
                   className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] tabular-nums text-muted-foreground"
-                  title="总额度 = 套餐基础额度 + 赠送/签到额度"
+                  title="总额度 = 套餐基础额度 + 赠送/签到额度 + 专属资源包 + 共享额度"
                 >
                   {planPart ? (
                     <span>基础 {formatCredits(planPart.remaining)} / {formatCredits(planPart.total)}</span>
                   ) : null}
-                  <span>赠送 {formatCredits(addOnPart.remaining)} / {formatCredits(addOnPart.total)}</span>
+                  {addOnPart ? (
+                    <span>赠送 {formatCredits(addOnPart.remaining)} / {formatCredits(addOnPart.total)}</span>
+                  ) : null}
+                  {packages.map((pkg) => (
+                    <span key={pkg.id || pkg.name}>
+                      {pkg.name} {formatCredits(pkg.remaining)} / {formatCredits(pkg.total)}
+                    </span>
+                  ))}
+                  {shared && shared.available !== false ? (
+                    <span>
+                      共享 {shared.unlimited ? "不限" : `${formatCredits(shared.remaining)} / ${formatCredits(shared.total)}`}
+                    </span>
+                  ) : null}
                 </div>
               ) : null}
 

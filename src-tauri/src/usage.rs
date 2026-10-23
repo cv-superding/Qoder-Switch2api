@@ -1,12 +1,16 @@
 //! 反代用量统计：请求数、Token 消耗，按账号 / 模型 / 日期聚合。
 
 use std::collections::BTreeMap;
+use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::store::{load_json, save_json};
 
 const MAX_RECORDS: usize = 5000;
+
+/// usage.json 是读-改-写，并发请求必须串行化，否则会丢记录
+static USAGE_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +57,7 @@ pub struct UsageState {
 }
 
 pub fn record_usage(entry: UsageRecord) {
+    let _guard = USAGE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut state = load_json::<UsageState>("usage.json");
     let mut record = entry;
     record.ts = crate::crypto::now_ms();

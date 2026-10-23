@@ -185,6 +185,8 @@ export default function CreditStatsPage() {
                   const expireAt = credit?.expiresAt ?? a.quota?.expiresAt ?? null;
                   const planPart = credit?.quota?.plan ?? a.quota?.plan ?? null;
                   const addOnPart = credit?.quota?.addOn ?? a.quota?.addOn ?? null;
+                  const packages = (credit?.quota?.packages ?? a.quota?.packages ?? []).filter((p) => p.available !== false);
+                  const shared = credit?.quota?.shared ?? a.quota?.shared ?? null;
                   const quotaData = hasQuotaData(credit?.quota ?? a.quota);
                   const exhausted = Boolean(credit?.isQuotaExceeded ?? a.quota?.isQuotaExceeded) && quotaData && (remaining ?? 0) <= 0;
                   const left = daysLeft(expireAt);
@@ -213,10 +215,18 @@ export default function CreditStatsPage() {
                       <td className="px-3 py-3 tabular-nums">
                         <span className="font-medium">{fmtNum(remaining)}</span>
                         <span className="text-muted-foreground"> / {fmtNum(total)} {unit}</span>
-                        {addOnPart ? (
-                          <div className="mt-0.5 text-[10px] text-muted-foreground">
-                            {planPart ? `基础 ${fmtNum(planPart.remaining)}/${fmtNum(planPart.total)} · ` : ""}
-                            赠送 {fmtNum(addOnPart.remaining)}/{fmtNum(addOnPart.total)}
+                        {quotaData && (planPart || addOnPart || packages.length > 0 || shared) ? (
+                          <div className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">
+                            {planPart ? <span>基础 {fmtNum(planPart.remaining)}/{fmtNum(planPart.total)}</span> : null}
+                            {addOnPart ? <span>赠送 {fmtNum(addOnPart.remaining)}/{fmtNum(addOnPart.total)}</span> : null}
+                            {packages.map((pkg) => (
+                              <span key={pkg.id || pkg.name}>
+                                {pkg.name} {fmtNum(pkg.remaining)}/{fmtNum(pkg.total)}
+                              </span>
+                            ))}
+                            {shared && shared.available !== false ? (
+                              <span>共享 {shared.unlimited ? "不限" : `${fmtNum(shared.remaining)}/${fmtNum(shared.total)}`}</span>
+                            ) : null}
                           </div>
                         ) : null}
                       </td>

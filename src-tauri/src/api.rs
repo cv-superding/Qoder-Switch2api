@@ -311,6 +311,7 @@ async fn get_credit(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         if let Some(obj) = value.as_object_mut() {
             obj.insert("expiresAt".into(), json!(usage.expires_at));
             obj.insert("isQuotaExceeded".into(), json!(usage.is_quota_exceeded));
+            obj.insert("totalUsagePercentage".into(), json!(usage.total_usage_percentage));
             obj.insert("updatedAt".into(), json!(crate::crypto::now_ms()));
         }
         value
@@ -413,6 +414,18 @@ async fn checkin_accounts(State(state): State<Arc<AppState>>, Json(body): Json<V
         } else {
             account.name.clone()
         };
+        if account.status == "disabled" {
+            continue;
+        }
+        if account.security_oauth_token.is_empty() && account.pat.is_empty() {
+            results.push(json!({
+                "id": account.id,
+                "name": name,
+                "result": "unavailable",
+                "error": "账号缺少登录凭证，请重新登录或导入登录态"
+            }));
+            continue;
+        }
         match info::list_campaigns(&edition, &account).await {
             Ok(campaigns) => {
                 if info::today_checked_in(&campaigns) {
@@ -430,7 +443,7 @@ async fn checkin_accounts(State(state): State<Arc<AppState>>, Json(body): Json<V
                 let mut reward = 0.0_f64;
                 let mut any_claimed = false;
                 let mut any_replayed = false;
-                let mut claim_error: Option<String> = None;
+                let mut claim_errors: Vec<String> = Vec::new();
                 for claimable in &claimables {
                     let campaign_id = claimable.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     match info::claim_campaign(&edition, &account, campaign_id).await {
@@ -447,27 +460,27 @@ async fn checkin_accounts(State(state): State<Arc<AppState>>, Json(body): Json<V
                                     .unwrap_or(0.0);
                             }
                         }
-                        Err(e) => {
-                            claim_error = Some(e);
-                            break;
-                        }
+                        Err(e) => claim_errors.push(e),
                     }
-                }
-                if let Some(e) = claim_error {
-                    append_jsonl(
-                        "checkin.jsonl",
-                        &json!({ "accountId": account.id, "edition": account.edition, "result": "error", "error": e }),
-                    );
-                    results.push(json!({ "id": account.id, "name": name, "result": "error", "error": e }));
-                    continue;
                 }
                 let result = if any_claimed {
                     "success"
                 } else if any_replayed {
                     "already"
+                } else if !claim_errors.is_empty() {
+                    "error"
                 } else {
                     "none"
                 };
+                if result == "error" {
+                    let error = claim_errors.join("；");
+                    append_jsonl(
+                        "checkin.jsonl",
+                        &json!({ "accountId": account.id, "edition": account.edition, "result": "error", "error": error }),
+                    );
+                    results.push(json!({ "id": account.id, "name": name, "result": "error", "error": error }));
+                    continue;
+                }
                 let reward = if reward > 0.0 { Some(reward) } else { None };
                 append_jsonl(
                     "checkin.jsonl",
@@ -497,7 +510,12 @@ async fn get_checkin_status(State(state): State<Arc<AppState>>) -> Response {
     let accounts_snapshot = state.accounts.read().await.accounts.clone();
     let mut results = Vec::new();
     for account in accounts_snapshot {
-        if account.security_oauth_token.is_empty() && account.pat.is_empty() {
+        if account.status == "disabled"
+            || (account.security_oauth_token.is_empty() && account.pat.is_empty())
+            || (account.status == "needs_relogin"
+                && account.refresh_token.is_empty()
+                && account.pat.is_empty())
+        {
             results.push(json!({ "id": account.id, "state": "unavailable" }));
             continue;
         }
@@ -858,7 +876,7 @@ async fn save_settings(State(state): State<Arc<AppState>>, Json(body): Json<Valu
     }
     if let Some(v) = incoming.get("autoCheckin").and_then(|v| v.as_object()) {
         settings.auto_checkin.enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
-        settings.auto_checkin.hour = v.get("hour").and_then(|x| x.as_i64()).unwrap_or(9).clamp(0, 23);
+        settings.auto_checkin.hour = v.get("hour").and_then(|x| x.as_i64()).unwrap_or(10).clamp(0, 23);
     }
     if let Some(v) = incoming.get("endpointOverrides").and_then(|v| v.as_object()) {
         settings.endpoint_overrides.clear();

@@ -29,13 +29,22 @@ export async function fetchJson(url, { method = "GET", headers = {}, body, timeo
 /**
  * 打开 SSE 流，返回 { response, nextLine }。
  * nextLine() 返回一行（不含 \n）或 null（流结束）。
+ * idleTimeoutMs 按「多久没收到数据」计时（流式生成应使用它，而不是总时长）。
  */
-export async function openSse(url, { method = "POST", headers = {}, body, timeoutMs = 0 } = {}) {
+export async function openSse(url, { method = "POST", headers = {}, body, timeoutMs = 0, idleTimeoutMs = 0 } = {}) {
   const controller = new AbortController();
   let timer = null;
-  if (timeoutMs > 0) {
-    timer = setTimeout(() => controller.abort(), timeoutMs);
-  }
+  let timedOut = false;
+  const arm = () => {
+    if (!idleTimeoutMs) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, idleTimeoutMs);
+  };
+  if (idleTimeoutMs > 0) arm();
+  else if (timeoutMs > 0) timer = setTimeout(() => controller.abort(), timeoutMs);
   let resp;
   try {
     resp = await fetch(url, {
@@ -51,6 +60,7 @@ export async function openSse(url, { method = "POST", headers = {}, body, timeou
     });
   } catch (e) {
     if (timer) clearTimeout(timer);
+    if (timedOut) throw new Error("上游空闲超时");
     throw e;
   }
   if (!resp.ok || !resp.body) {
@@ -71,8 +81,18 @@ export async function openSse(url, { method = "POST", headers = {}, body, timeou
           buffer = buffer.slice(idx + 1);
           return line;
         }
-        const { done, value } = await reader.read();
+        let chunk;
+        try {
+          chunk = await reader.read();
+        } catch (e) {
+          if (timer) clearTimeout(timer);
+          if (timedOut) throw new Error("上游空闲超时");
+          throw e;
+        }
+        arm();
+        const { done, value } = chunk;
         if (done) {
+          if (timer) clearTimeout(timer);
           if (buffer.length > 0) {
             const last = buffer;
             buffer = "";

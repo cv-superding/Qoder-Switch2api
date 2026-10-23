@@ -95,6 +95,27 @@ pub struct QuotaPart {
     pub unit: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaPackage {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub total: Option<f64>,
+    pub used: Option<f64>,
+    pub remaining: Option<f64>,
+    pub percentage: Option<f64>,
+    #[serde(default)]
+    pub unit: String,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub available: Option<bool>,
+    #[serde(default)]
+    pub unlimited: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaSnapshot {
@@ -111,11 +132,18 @@ pub struct QuotaSnapshot {
     /// 上游是否判定额度已用尽（Free 账号可能是 0/0）
     #[serde(default)]
     pub is_quota_exceeded: Option<bool>,
+    #[serde(default)]
+    pub total_usage_percentage: Option<f64>,
     /// 套餐额度与加油包明细（旧数据无此字段）
     #[serde(default)]
     pub plan: Option<QuotaPart>,
     #[serde(default)]
     pub add_on: Option<QuotaPart>,
+    /// 专属资源包与组织共享额度（旧数据无此字段）
+    #[serde(default)]
+    pub packages: Vec<QuotaPackage>,
+    #[serde(default)]
+    pub shared: Option<QuotaPackage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,7 +373,7 @@ pub async fn try_refresh_account(
         Some(a) => a,
         None => return false,
     };
-    if account.refresh_token.is_empty() {
+    if account.refresh_token.is_empty() && account.pat.is_empty() {
         return false;
     }
     let edition = edition_of(&account.edition);
@@ -369,14 +397,18 @@ pub async fn try_refresh_account(
             true
         }
         Err(e) => {
+            // 网络抖动/上游 5xx 不等于登录态失效，不要直接标 needs_relogin
+            let auth_failure = e.contains("HTTP 401")
+                || e.contains("HTTP 403")
+                || e.contains("TOKEN_EXPIRE")
+                || e.contains("Offline user session")
+                || e.contains("invalid_grant");
             let mut manager = accounts.write().await;
-            let _ = manager.update(
-                id,
-                &serde_json::json!({
-                    "status": "needs_relogin",
-                    "lastError": format!("续期失败: {}", e),
-                }),
-            );
+            let mut patch = serde_json::json!({ "lastError": format!("续期失败: {}", e) });
+            if auth_failure {
+                patch["status"] = serde_json::json!("needs_relogin");
+            }
+            let _ = manager.update(id, &patch);
             false
         }
     }
@@ -680,6 +712,9 @@ impl AccountManager {
             .filter(|a| {
                 a.edition == edition
                     && a.status != "disabled"
+                    && !(a.status == "needs_relogin"
+                        && a.refresh_token.is_empty()
+                        && a.pat.is_empty())
                     && !self.is_cooling(&a.id)
                     && !(group == "proxy" && a.group == "desktop")
                     && (!a.security_oauth_token.is_empty() || !a.pat.is_empty())
@@ -700,7 +735,11 @@ impl AccountManager {
         let now = now_ms();
         let usable: Vec<Account> = candidates
             .iter()
-            .filter(|a| a.token_expire_at.map(|t| t > now).unwrap_or(true) || !a.refresh_token.is_empty())
+            .filter(|a| {
+                a.token_expire_at.map(|t| t > now).unwrap_or(true)
+                    || !a.refresh_token.is_empty()
+                    || !a.pat.is_empty()
+            })
             .cloned()
             .collect();
         let mut sorted: Vec<Account> = if usable.is_empty() { candidates.clone() } else { usable };
@@ -868,10 +907,16 @@ fn apply_normalized(account: &mut Account, n: &NormalizedAccount, now: i64) {
 
 fn quota_score(a: &Account) -> f64 {
     match &a.quota {
-        Some(q) => match (q.remaining, q.total) {
-            (Some(remaining), Some(total)) if total > 0.0 => remaining / total,
-            _ => 0.0,
-        },
+        Some(q) => {
+            // 已过期的旧额度快照不能继续排在最前面
+            if q.expires_at.map(|t| t > 0 && t < now_ms()).unwrap_or(false) {
+                return 0.0;
+            }
+            match (q.remaining, q.total) {
+                (Some(remaining), Some(total)) if total > 0.0 => remaining / total,
+                _ => 0.0,
+            }
+        }
         None => 0.0,
     }
 }

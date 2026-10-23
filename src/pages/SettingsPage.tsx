@@ -298,7 +298,7 @@ export default function SettingsPage() {
             <div>
               <div className="text-[12.5px] font-medium">每日自动签到</div>
               <p className="mt-0.5 text-[10.5px] text-muted-foreground">
-                程序在运行时会于设定时间后自动检查，错过整点也会当天补签。
+                活动每天 10:00（UTC+8）刷新；程序在设定时间后自动检查，未成功会持续重试。
               </p>
             </div>
             <div className="flex items-center gap-3">

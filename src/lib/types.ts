@@ -48,6 +48,8 @@ export interface Account {
     totalUsagePercentage?: number | null;
     plan?: QuotaPart | null;
     addOn?: QuotaPart | null;
+    packages?: QuotaPackage[];
+    shared?: QuotaPackage | null;
   } | null;
   plan: PlanInfo | null;
   createdAt: number;
@@ -110,6 +112,19 @@ export interface QuotaPart {
   unit: string;
 }
 
+export interface QuotaPackage {
+  id?: string;
+  name: string;
+  total: number | null;
+  used: number | null;
+  remaining: number | null;
+  percentage?: number | null;
+  unit: string;
+  expiresAt?: number | null;
+  available?: boolean;
+  unlimited?: boolean;
+}
+
 export interface QuotaInfo {
   usageType: string;
   totalUsagePercentage: number | null;
@@ -123,6 +138,8 @@ export interface QuotaInfo {
     unit: string;
     plan?: QuotaPart | null;
     addOn?: QuotaPart | null;
+    packages?: QuotaPackage[];
+    shared?: QuotaPackage | null;
   } | null;
 }
 

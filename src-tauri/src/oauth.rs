@@ -18,13 +18,21 @@ const POLL_TIMEOUT_MS: i64 = 10 * 60 * 1000;
 pub struct DeviceTokenResult {
     pub token: String,
     #[serde(default)]
-    pub user_id: String,
+    pub user_id: serde_json::Value,
     #[serde(default)]
     pub refresh_token: String,
     #[serde(default)]
-    pub expires_at: String,
+    pub expires_at: serde_json::Value,
     #[serde(default)]
-    pub refresh_token_expires_at: String,
+    pub refresh_token_expires_at: serde_json::Value,
+}
+
+fn value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,11 +306,11 @@ pub async fn poll_login(login_id: &str) -> LoginOutcome {
 
     let uid = status_json
         .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&token.user_id)
-        .to_string();
+        .map(value_text)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| value_text(&token.user_id));
     let uid = if uid.is_empty() {
-        info_json.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        info_json.get("id").map(value_text).unwrap_or_default()
     } else {
         uid
     };
@@ -382,8 +390,8 @@ pub async fn poll_login(login_id: &str) -> LoginOutcome {
             .to_string(),
         security_oauth_token: token.token.clone(),
         refresh_token: token.refresh_token.clone(),
-        token_expire_at: Some(serde_json::json!(token.expires_at)),
-        refresh_token_expires_at: Some(serde_json::json!(token.refresh_token_expires_at)),
+        token_expire_at: Some(token.expires_at.clone()),
+        refresh_token_expires_at: Some(token.refresh_token_expires_at.clone()),
         pat: String::new(),
         machine_id: state.machine_id.clone(),
         machine_token: state.machine_token.clone(),
@@ -444,42 +452,91 @@ pub struct RefreshResult {
         alias = "refreshTokenExpireAt"
     )]
     pub refresh_token_expires_at: Option<serde_json::Value>,
+    /// jobToken 返回的到期时间（毫秒）
+    #[serde(default, alias = "expires_in", alias = "expiresIn")]
+    pub expires_in: Option<f64>,
 }
 
-/// 用 refresh_token 续期
+/// 用 refresh_token / PAT 续期。
+/// drt- 走设备流刷新，jrt- 走 jobToken/refresh，失败用 pt- 重新兑换。
 pub async fn refresh_token(
     edition: &Edition,
     account: &crate::account::Account,
 ) -> Result<RefreshResult, String> {
-    if account.refresh_token.is_empty() {
+    let base = edition.oauth.open_api_base_url.trim_end_matches('/');
+    let refresh = account.refresh_token.as_str();
+    let pat = account.pat.as_str();
+    if refresh.is_empty() && pat.is_empty() {
         return Err("账号没有 refresh_token，无法续期，请重新登录".into());
     }
-    let client = crate::http::client();
-    let resp = client
-        .post(format!(
-            "{}{}",
-            edition.oauth.open_api_base_url, edition.oauth.refresh_path
-        ))
+    let mut errors: Vec<String> = Vec::new();
+    if refresh.starts_with("drt-") {
+        match post_refresh(&format!("{}{}", base, edition.oauth.refresh_path), &serde_json::json!({ "refresh_token": refresh })).await {
+            Ok(value) => return parse_refresh(value, account),
+            Err(e) => errors.push(format!("设备令牌刷新失败: {}", e)),
+        }
+    }
+    if refresh.starts_with("jrt-") {
+        match post_refresh(&format!("{}/api/v1/jobToken/refresh", base), &serde_json::json!({ "refresh_token": refresh })).await {
+            Ok(value) => return parse_refresh(value, account),
+            Err(e) => errors.push(format!("Job Token 刷新失败: {}", e)),
+        }
+        if !pat.is_empty() {
+            match post_refresh(&format!("{}/api/v1/jobToken/exchange", base), &serde_json::json!({ "personal_token": pat })).await {
+                Ok(value) => return parse_refresh(value, account),
+                Err(e) => errors.push(format!("PAT 兑换失败: {}", e)),
+            }
+        }
+        return Err(errors.join("；"));
+    }
+    if refresh.is_empty() && !pat.is_empty() {
+        match post_refresh(&format!("{}/api/v1/jobToken/exchange", base), &serde_json::json!({ "personal_token": pat })).await {
+            Ok(value) => return parse_refresh(value, account),
+            Err(e) => errors.push(format!("PAT 兑换失败: {}", e)),
+        }
+    }
+    if !refresh.is_empty() {
+        match post_refresh(&format!("{}{}", base, edition.oauth.refresh_path), &serde_json::json!({ "refresh_token": refresh })).await {
+            Ok(value) => return parse_refresh(value, account),
+            Err(e) => errors.push(format!("设备令牌刷新失败: {}", e)),
+        }
+    }
+    Err(if errors.is_empty() { "刷新失败".into() } else { errors.join("；") })
+}
+
+async fn post_refresh(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let resp = crate::http::client()
+        .post(url)
         .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "refresh_token": account.refresh_token }))
+        .json(body)
         .send()
         .await
         .map_err(|e| format!("刷新请求失败: {}", e))?;
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("刷新失败: {}", text.chars().take(200).collect::<String>()));
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>()));
     }
-    let result: RefreshResult = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析刷新响应失败: {}", e))?;
+    serde_json::from_str(&text).map_err(|e| format!("解析刷新响应失败: {}", e))
+}
+
+fn parse_refresh(raw: serde_json::Value, account: &crate::account::Account) -> Result<RefreshResult, String> {
+    let result: RefreshResult =
+        serde_json::from_value(raw).map_err(|e| format!("解析刷新响应失败: {}", e))?;
     if result.security_oauth_token.is_empty() {
         return Err("刷新响应缺少 token".into());
+    }
+    let mut expires_at = result.expires_at.clone().unwrap_or(serde_json::Value::Null);
+    if expires_at.is_null() {
+        if let Some(ms) = result.expires_in.filter(|v| *v > 0.0) {
+            expires_at = serde_json::json!(crate::crypto::now_ms() + ms as i64);
+        }
     }
     Ok(RefreshResult {
         security_oauth_token: result.security_oauth_token,
         refresh_token: Some(result.refresh_token.unwrap_or_else(|| account.refresh_token.clone())),
-        expires_at: Some(result.expires_at.unwrap_or(serde_json::Value::Null)),
+        expires_at: Some(expires_at),
         refresh_token_expires_at: result.refresh_token_expires_at,
+        expires_in: None,
     })
 }

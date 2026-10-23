@@ -237,7 +237,12 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
     const results = [];
     for (const summary of accountManager.list()) {
       const account = accountManager.get(summary.id);
-      if (!account || (!account.securityOauthToken && !account.pat)) {
+      if (
+        !account ||
+        account.status === "disabled" ||
+        (!account.securityOauthToken && !account.pat) ||
+        (account.status === "needs_relogin" && !account.refreshToken && !account.pat)
+      ) {
         results.push({ id: summary.id, state: "unavailable" });
         continue;
       }
@@ -258,11 +263,22 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
   });
 
   router.post("/accounts/checkin", async (req, res) => {
-    const ids = Array.isArray(req.body?.ids) ? req.body.ids : accountManager.list().map((a) => a.id);
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids
+      : accountManager.list().filter((a) => a.status !== "disabled").map((a) => a.id);
     const results = [];
     for (const id of ids) {
       const account = accountManager.get(id);
-      if (!account) continue;
+      if (!account || account.status === "disabled") continue;
+      if (!account.securityOauthToken && !account.pat) {
+        results.push({
+          id,
+          name: account.name || account.email,
+          result: "unavailable",
+          error: "账号缺少登录凭证，请重新登录或导入登录态",
+        });
+        continue;
+      }
       const edition = getEdition(account.edition);
       try {
         const campaigns = await info.listCampaigns(edition, account);
@@ -280,16 +296,34 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
         let reward = 0;
         let anyClaimed = false;
         let anyReplayed = false;
+        const claimErrors = [];
         for (const claimable of claimables) {
-          const claim = await info.claimCampaign(edition, account, claimable.id);
-          const credit = claim.replayed
-            ? 0
-            : Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
-          if (Number.isFinite(credit)) reward += credit;
-          if (claim.replayed) anyReplayed = true;
-          else anyClaimed = true;
+          try {
+            const claim = await info.claimCampaign(edition, account, claimable.id);
+            const credit = claim.replayed
+              ? 0
+              : Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
+            if (Number.isFinite(credit)) reward += credit;
+            if (claim.replayed) anyReplayed = true;
+            else anyClaimed = true;
+          } catch (e) {
+            // 多个活动时不要因为一个失败就放弃其余可领取项
+            claimErrors.push(e.message);
+          }
         }
-        const result = anyClaimed ? "success" : anyReplayed ? "already" : "none";
+        const result = anyClaimed
+          ? "success"
+          : anyReplayed
+            ? "already"
+            : claimErrors.length > 0
+              ? "error"
+              : "none";
+        if (result === "error") {
+          const error = claimErrors.join("；");
+          appendJsonl("checkin.jsonl", { accountId: id, edition: account.edition, result, error });
+          results.push({ id, name: account.name || account.email, result, error });
+          continue;
+        }
         appendJsonl("checkin.jsonl", {
           accountId: id,
           edition: account.edition,

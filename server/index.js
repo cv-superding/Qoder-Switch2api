@@ -30,7 +30,7 @@ function defaultSettings() {
     closeToTray: true,
     clientDirOverrides: { domestic: "", international: "" },
     clientExePaths: { domestic: "", international: "" },
-    autoCheckin: { enabled: false, hour: 9 },
+    autoCheckin: { enabled: false, hour: 10 },
     endpointOverrides: { domestic: {}, international: {} },
     proxy: {
       domestic: {
@@ -180,35 +180,73 @@ function localDayKey(date = new Date()) {
 async function runAutoCheckin(force = false) {
   if (!settings.autoCheckin?.enabled && !force) return;
   const now = new Date();
-  if (!force && now.getHours() < (settings.autoCheckin?.hour ?? 9)) return;
+  const hour = settings.autoCheckin?.hour ?? 10;
+  if (!force && now.getHours() < hour) return;
   const today = localDayKey(now);
   if (!force && lastCheckinDay === today) return;
   const accounts = accountManager.list().filter((a) => a.status !== "disabled");
   let failed = false;
+  let pending = 0;
   for (const account of accounts) {
+    let full = accountManager.get(account.id);
+    // 没有登录凭证或明确失效的账号跳过，避免整点后每 10 分钟重复报同一个错
+    if (!full || (!full.securityOauthToken && !full.pat)) continue;
+    if (full.status === "needs_relogin" && !full.refreshToken && !full.pat) continue;
+    // 自动签到前先尝试续期，避免账号因为 token 过期而一直失败
+    const expiresSoon = typeof full.tokenExpireAt === "number" && full.tokenExpireAt < Date.now() + 60000;
+    if (full.refreshToken && (full.status === "needs_relogin" || expiresSoon)) {
+      if (!(await accountManager.tryRefresh(full.id))) continue;
+      full = accountManager.get(full.id);
+      if (!full) continue;
+    }
     const edition = effectiveEdition(account.edition);
-    const full = accountManager.get(account.id);
     try {
       const campaigns = await info.listCampaigns(edition, full);
       const claimables = info.findClaimableCheckins(campaigns);
-      if (claimables.length === 0) continue;
-      let reward = 0;
-      for (const claimable of claimables) {
-        const claim = await info.claimCampaign(edition, full, claimable.id);
-        const credit = claim.replayed
-          ? 0
-          : Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
-        if (Number.isFinite(credit)) reward += credit;
+      if (claimables.length === 0) {
+        // 10:00（UTC+8）前活动列表可能还没有当日轮次，先不盖章，过一会重试
+        if (!info.todayCheckedIn(campaigns)) pending += 1;
+        continue;
       }
-      appendJsonl("checkin.jsonl", {
-        accountId: account.id,
-        edition: account.edition,
-        result: "success",
-        auto: true,
-        rewardCredit: reward || null,
-      });
-      console.log(`[auto-checkin] ${account.name || account.email || account.id} 签到成功`);
+      let reward = 0;
+      let anyClaimed = false;
+      let anyReplayed = false;
+      for (const claimable of claimables) {
+        try {
+          const claim = await info.claimCampaign(edition, full, claimable.id);
+          if (claim.replayed) anyReplayed = true;
+          else anyClaimed = true;
+          if (!claim.replayed) {
+            const credit = Number(claim.rewardCredit ?? claimable.rewardCredit ?? 0);
+            if (Number.isFinite(credit)) reward += credit;
+          }
+        } catch (e) {
+          failed = true;
+          appendJsonl("checkin.jsonl", {
+            accountId: account.id,
+            edition: account.edition,
+            result: "error",
+            auto: true,
+            error: e.message,
+          });
+        }
+      }
+      if (anyClaimed || anyReplayed) {
+        appendJsonl("checkin.jsonl", {
+          accountId: account.id,
+          edition: account.edition,
+          result: anyClaimed ? "success" : "already",
+          auto: true,
+          rewardCredit: reward || null,
+        });
+        console.log(`[auto-checkin] ${account.name || account.email || account.id} ${anyClaimed ? "签到成功" : "今日已签到"}`);
+      }
     } catch (e) {
+      // 账号没有活动接口（部分版本 404）时按「暂时没有活动」处理，而不是永久失败
+      if (/HTTP 404/.test(e.message || "")) {
+        pending += 1;
+        continue;
+      }
       failed = true;
       appendJsonl("checkin.jsonl", {
         accountId: account.id,
@@ -219,8 +257,9 @@ async function runAutoCheckin(force = false) {
       });
     }
   }
-  // 有失败就不盖章，10 分钟后的下一轮会重试；全部处理成功才跳过当天剩余轮次
-  if (!failed) lastCheckinDay = today;
+  // 失败不盖章，下一轮重试；没有活动时最多重试到配置时间后 2 小时再收工
+  const graceHour = Math.min(hour + 2, 23);
+  if (!failed && (pending === 0 || now.getHours() >= graceHour)) lastCheckinDay = today;
 }
 
 function scheduleAutoCheckin() {

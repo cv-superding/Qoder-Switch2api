@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::account::{Account, QuotaPart};
+use crate::account::{Account, QuotaPackage, QuotaPart};
 use crate::cosy::{build_model_list_headers, legacy_decode};
 use crate::editions::Edition;
 
@@ -26,6 +26,8 @@ pub struct QuotaValue {
     pub unit: String,
     pub plan: Option<QuotaPart>,
     pub add_on: Option<QuotaPart>,
+    pub packages: Vec<QuotaPackage>,
+    pub shared: Option<QuotaPackage>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -43,19 +45,25 @@ fn open_api(edition: &Edition, path: &str) -> String {
 }
 
 fn auth_header(account: &Account) -> String {
-    format!("Bearer {}", if account.pat.is_empty() { &account.security_oauth_token } else { &account.pat })
+    format!("Bearer {}", if account.security_oauth_token.is_empty() { &account.pat } else { &account.security_oauth_token })
 }
 
 fn json_ms(value: Option<&Value>) -> Option<i64> {
     let value = value?;
-    let ms = if let Some(n) = value.as_i64() {
+    let ms = if let Some(n) = value.as_f64() {
+        let n = n as i64;
         if n < 1_000_000_000_000 { n * 1000 } else { n }
-    } else {
-        value.as_str().and_then(|raw| {
+    } else if let Some(raw) = value.as_str() {
+        if let Ok(n) = raw.trim().parse::<f64>() {
+            let n = n as i64;
+            if n < 1_000_000_000_000 { n * 1000 } else { n }
+        } else {
             chrono::DateTime::parse_from_rfc3339(raw)
                 .ok()
-                .map(|date| date.timestamp_millis())
-        })?
+                .map(|date| date.timestamp_millis())?
+        }
+    } else {
+        return None;
     };
     // 0 / 负数 / 9999-12-31 都表示「永不过期」
     if ms <= 0 || ms >= 4_102_444_800_000 {
@@ -96,46 +104,129 @@ fn quota_part(value: Option<&Value>) -> Option<QuotaPart> {
     })
 }
 
-/// 合并套餐额度与加油包（addOnQuota）；上游 percentage 为「已用比例」
-fn combine_quota(plan: Option<QuotaPart>, add_on: Option<QuotaPart>) -> Option<QuotaValue> {
+fn normalize_packages(raw: Option<&Value>) -> Vec<QuotaPackage> {
+    raw.and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|p| {
+                    let total = p.get("total").and_then(|v| v.as_f64());
+                    let remaining = p.get("remaining").and_then(|v| v.as_f64());
+                    if total.unwrap_or(0.0) <= 0.0 && remaining.unwrap_or(0.0) <= 0.0 {
+                        return None;
+                    }
+                    Some(QuotaPackage {
+                        id: p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        name: p
+                            .get("name")
+                            .or_else(|| p.get("description"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("专属资源包")
+                            .to_string(),
+                        total,
+                        used: p.get("used").and_then(|v| v.as_f64()),
+                        remaining,
+                        percentage: p.get("percentage").and_then(|v| v.as_f64()),
+                        unit: p.get("unit").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        expires_at: json_ms(p.get("expiresAt")),
+                        available: Some(p.get("available").and_then(|v| v.as_bool()).unwrap_or(true)),
+                        unlimited: None,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn normalize_shared(raw: Option<&Value>) -> Option<QuotaPackage> {
+    let v = raw?;
+    if !v.is_object() {
+        return None;
+    }
+    let cap = v.get("cap").or_else(|| v.get("total")).and_then(|x| x.as_f64());
+    let remaining = v.get("remaining").and_then(|x| x.as_f64());
+    if cap.is_none() && remaining.is_none() {
+        return None;
+    }
+    Some(QuotaPackage {
+        id: String::new(),
+        name: "共享额度".into(),
+        total: cap,
+        used: v.get("used").and_then(|x| x.as_f64()),
+        remaining,
+        percentage: v.get("percentage").and_then(|x| x.as_f64()),
+        unit: v.get("unit").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        expires_at: json_ms(v.get("expiresAt")),
+        available: Some(v.get("available").and_then(|x| x.as_bool()).unwrap_or(true)),
+        unlimited: Some(cap.map(|c| c < 0.0).unwrap_or(false)),
+    })
+}
+
+/// 合并套餐额度、加油包、专属资源包与共享额度；上游 percentage 为「已用比例」
+fn combine_quota(
+    plan: Option<QuotaPart>,
+    add_on: Option<QuotaPart>,
+    packages: Vec<QuotaPackage>,
+    shared: Option<QuotaPackage>,
+) -> Option<QuotaValue> {
     // 上游可能返回 total=0 的空 addOnQuota，展示上没有意义
     let add_on = add_on.filter(|q| q.total.unwrap_or(0.0) > 0.0 || q.remaining.unwrap_or(0.0) > 0.0);
-    let (total, used, remaining, percentage, unit) = match (&plan, &add_on) {
-        (None, None) => return None,
-        (Some(plan), None) => {
-            (plan.total, plan.used, plan.remaining, plan.percentage, plan.unit.clone())
+    let usable_packages: Vec<&QuotaPackage> = packages
+        .iter()
+        .filter(|p| p.available != Some(false))
+        .collect();
+    let usable_shared = shared
+        .as_ref()
+        .filter(|s| s.available != Some(false) && s.unlimited != Some(true));
+    if plan.is_none() && add_on.is_none() && packages.is_empty() && shared.is_none() {
+        return None;
+    }
+    let mut totals = [0.0_f64; 3];
+    let mut seen = [false; 3];
+    {
+        let mut add = |total: Option<f64>, used: Option<f64>, remaining: Option<f64>| {
+            for (i, value) in [total, used, remaining].into_iter().enumerate() {
+                if let Some(v) = value {
+                    totals[i] += v;
+                    seen[i] = true;
+                }
+            }
+        };
+        if let Some(p) = &plan {
+            add(p.total, p.used, p.remaining);
         }
-        (None, Some(add_on)) => (
-            add_on.total,
-            add_on.used,
-            add_on.remaining,
-            add_on.percentage,
-            add_on.unit.clone(),
-        ),
-        (Some(plan), Some(add_on)) => {
-            let total = plan.total.zip(add_on.total).map(|(a, b)| a + b);
-            let used = plan.used.zip(add_on.used).map(|(a, b)| a + b);
-            let remaining = plan.remaining.zip(add_on.remaining).map(|(a, b)| a + b);
-            let percentage = total
-                .zip(used)
-                .filter(|(total, _)| *total > 0.0)
-                .map(|(total, used)| used / total);
-            let unit = if plan.unit.is_empty() {
-                add_on.unit.clone()
-            } else {
-                plan.unit.clone()
-            };
-            (total, used, remaining, percentage, unit)
+        if let Some(a) = &add_on {
+            add(a.total, a.used, a.remaining);
         }
-    };
+        for pkg in &usable_packages {
+            add(pkg.total, pkg.used, pkg.remaining);
+        }
+        if let Some(shared) = usable_shared {
+            add(shared.total, shared.used, shared.remaining);
+        }
+    }
+    let pick = |i: usize| if seen[i] { Some(totals[i]) } else { None };
+    let total = pick(0);
+    let used = pick(1);
+    let percentage = total.zip(used).filter(|(t, _)| *t > 0.0).map(|(t, u)| u / t);
+    let unit = plan
+        .as_ref()
+        .map(|p| p.unit.clone())
+        .filter(|u| !u.is_empty())
+        .or_else(|| add_on.as_ref().map(|a| a.unit.clone()).filter(|u| !u.is_empty()))
+        .or_else(|| packages.first().map(|p| p.unit.clone()).filter(|u| !u.is_empty()))
+        .or_else(|| shared.as_ref().map(|s| s.unit.clone()).filter(|u| !u.is_empty()))
+        .unwrap_or_default();
     Some(QuotaValue {
         total,
         used,
-        remaining,
+        remaining: pick(2),
         percentage,
         unit,
         plan,
         add_on,
+        packages,
+        shared,
     })
 }
 
@@ -144,6 +235,8 @@ pub async fn get_quota_usage(edition: &Edition, account: &Account) -> Result<Quo
     let quota = combine_quota(
         quota_part(data.get("userQuota")),
         quota_part(data.get("addOnQuota")),
+        normalize_packages(data.get("dedicatedResourcePackages")),
+        normalize_shared(data.get("orgResourcePackage")),
     );
     Ok(QuotaInfo {
         usage_type: data.get("usageType").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -184,9 +277,8 @@ pub async fn get_me_usage(edition: &Edition, account: &Account) -> Option<Value>
 }
 
 pub async fn list_campaigns(edition: &Edition, account: &Account) -> Result<Vec<Value>, String> {
-    let sep = if edition.oauth.campaigns_path.contains('?') { "&" } else { "?" };
-    let path = format!("{}{}forceRefresh=true", edition.oauth.campaigns_path, sep);
-    let data = get_json(edition, account, &path).await?;
+    // 不带 forceRefresh：带上它会让未打开过活动页的账号被上游过滤掉每日签到行
+    let data = get_json(edition, account, &edition.oauth.campaigns_path).await?;
     Ok(match &data {
         Value::Array(arr) => arr.clone(),
         Value::Object(obj) => obj
@@ -244,8 +336,16 @@ fn is_credit_campaign(c: &Value) -> bool {
 
 /// 活动时间窗（上游是秒级时间戳）
 fn campaign_active(c: &Value, now_secs: i64) -> bool {
-    let start_at = c.get("startAt").and_then(|v| v.as_i64()).unwrap_or(0);
-    let end_at = c.get("endAt").and_then(|v| v.as_i64()).unwrap_or(0);
+    let start_at = c
+        .get("startAt")
+        .or_else(|| c.get("start_at"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let end_at = c
+        .get("endAt")
+        .or_else(|| c.get("end_at"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     if start_at > 0 && now_secs < start_at {
         return false;
     }
@@ -253,6 +353,14 @@ fn campaign_active(c: &Value, now_secs: i64) -> bool {
         return false;
     }
     true
+}
+
+fn value_id(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 /// 可领取的签到活动（可同时存在多个）
@@ -272,7 +380,7 @@ pub fn find_claimable_checkins(campaigns: &[Value]) -> Vec<Value> {
                 .get("id")
                 .or_else(|| c.get("campaignId"))
                 .or_else(|| c.get("campaign_id"))
-                .and_then(|v| v.as_str())?;
+                .and_then(value_id)?;
             Some(json!({
                 "id": id,
                 "name": field(c, "name", "title").unwrap_or("每日奖励"),
@@ -286,7 +394,8 @@ pub fn find_claimable_checkin(campaigns: &[Value]) -> Option<Value> {
     find_claimable_checkins(campaigns).into_iter().next()
 }
 
-/// 今日是否已签到：只认签到类（CLAIM_BENEFIT）活动，VIEW_DETAILS 营销活动不算
+/// 今日是否已签到：CLAIM_BENEFIT 直接算；老活动领取后降级成 VIEW_DETAILS
+/// 但保留 CREDITS 金额的也算。纯营销 VIEW_DETAILS（无金额）不算。
 pub fn today_checked_in(campaigns: &[Value]) -> bool {
     campaigns.iter().any(|c| {
         let status = campaign_status(c);
@@ -297,7 +406,9 @@ pub fn today_checked_in(campaigns: &[Value]) -> bool {
         if action == "CLAIM_BENEFIT" {
             return true;
         }
-        action.is_empty() && campaign_kind(c) == "CREDITS"
+        (action.is_empty() || action == "VIEW_DETAILS")
+            && campaign_kind(c) == "CREDITS"
+            && campaign_amount(c) > 0.0
     })
 }
 
@@ -367,6 +478,14 @@ pub async fn claim_campaign(edition: &Edition, account: &Account, campaign_id: &
     }
     let replayed = body.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false)
         || data.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !replayed
+        && !claim_status.is_empty()
+        && claim_status != "CLAIMED"
+        && claim_status != "GRANTED"
+        && claim_status != "SUCCESS"
+    {
+        return Err(format!("上游未确认领取成功（status={}）", claim_status));
+    }
     let reward = body
         .get("benefit")
         .and_then(|b| b.get("amount"))
@@ -518,6 +637,41 @@ mod tests {
         let rows = find_claimable_checkins(&[past, active]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get("id").and_then(|v| v.as_str()), Some("active"));
+    }
+
+    #[test]
+    fn downgraded_claimed_credit_row_counts_as_checkin() {
+        let campaigns = vec![json!({
+            "campaignId": "daily",
+            "actionType": "VIEW_DETAILS",
+            "claimStatus": "CLAIMED",
+            "benefit": { "kind": "CREDITS", "amount": 100 }
+        })];
+        assert!(today_checked_in(&campaigns));
+    }
+
+    #[test]
+    fn quota_packages_join_totals_and_unlimited_shared_is_ignored() {
+        let quota = combine_quota(
+            Some(QuotaPart { total: Some(300.0), used: Some(100.0), remaining: Some(200.0), percentage: None, unit: "credits".into() }),
+            Some(QuotaPart { total: Some(500.0), used: Some(0.0), remaining: Some(500.0), percentage: None, unit: "credits".into() }),
+            vec![
+                QuotaPackage { name: "包".into(), total: Some(1000.0), used: Some(200.0), remaining: Some(800.0), available: Some(true), ..Default::default() },
+                QuotaPackage { name: "不可用".into(), total: Some(999.0), used: Some(0.0), remaining: Some(999.0), available: Some(false), ..Default::default() },
+            ],
+            Some(QuotaPackage { name: "共享".into(), total: Some(-1.0), remaining: Some(1_000_000.0), available: Some(true), unlimited: Some(true), ..Default::default() }),
+        ).expect("quota");
+        assert_eq!(quota.total, Some(1800.0));
+        assert_eq!(quota.remaining, Some(1500.0));
+        assert_eq!(quota.packages.len(), 2);
+        assert_eq!(quota.shared.and_then(|s| s.unlimited), Some(true));
+    }
+
+    #[test]
+    fn numeric_string_expiry_is_parsed() {
+        assert_eq!(json_ms(Some(&json!("1792724800000"))), Some(1_792_724_800_000));
+        assert_eq!(json_ms(Some(&json!("1792724800"))), Some(1_792_724_800_000));
+        assert_eq!(json_ms(Some(&json!(1792724800.0))), Some(1_792_724_800_000));
     }
 
     #[test]

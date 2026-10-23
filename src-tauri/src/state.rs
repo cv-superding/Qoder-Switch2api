@@ -86,7 +86,7 @@ impl Default for Settings {
             close_to_tray: true,
             client_dir_overrides: Default::default(),
             client_exe_paths: Default::default(),
-            auto_checkin: AutoCheckin { enabled: false, hour: 9 },
+            auto_checkin: AutoCheckin { enabled: false, hour: 10 },
             endpoint_overrides: Default::default(),
             proxy,
         }

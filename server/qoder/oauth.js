@@ -197,30 +197,106 @@ export async function pollLogin(loginId) {
   return { status: "done", account };
 }
 
-/** 用 refresh_token 续期；成功返回 { securityOauthToken, refreshToken, tokenExpireAt } */
+/**
+ * 用 refresh_token / PAT 续期。
+ * 设备流（drt-）走 deviceToken/refresh；旧版 PAT 账号（jrt-）走 jobToken/refresh，
+ * 失败时用 pt- 重新兑换 job token。成功返回 token 与新的到期时间。
+ */
 export async function refreshToken(edition, account) {
-  if (!account.refreshToken) {
+  const base = edition.oauth.openApiBaseUrl;
+  const refresh = account.refreshToken || "";
+  const pat = account.pat || "";
+  if (!refresh && !pat) {
     throw new Error("账号没有 refresh_token，无法续期，请重新登录");
   }
-  const url = edition.oauth.openApiBaseUrl + edition.oauth.refreshPath;
+  const errors = [];
+  const deviceRefresh = async () =>
+    normalizeRefresh(await postRefresh(`${base}${edition.oauth.refreshPath}`, { refresh_token: refresh }), account);
+  const jobRefresh = async () =>
+    normalizeRefresh(await postRefresh(`${base}/api/v1/jobToken/refresh`, { refresh_token: refresh }), account);
+  const patExchange = async () =>
+    normalizeRefresh(await postRefresh(`${base}/api/v1/jobToken/exchange`, { personal_token: pat }), account);
+
+  // 设备流（drt-）只走自己的端点，PAT 不能劫持
+  if (refresh.startsWith("drt-")) {
+    try {
+      return await deviceRefresh();
+    } catch (e) {
+      errors.push(`设备令牌刷新失败: ${e.message}`);
+    }
+  }
+  // 旧版 PAT 账号（jrt-）先刷新 job token，再用 pt- 重新兑换兜底
+  if (refresh.startsWith("jrt-")) {
+    try {
+      return await jobRefresh();
+    } catch (e) {
+      errors.push(`Job Token 刷新失败: ${e.message}`);
+    }
+    if (pat) {
+      try {
+        return await patExchange();
+      } catch (e) {
+        errors.push(`PAT 兑换失败: ${e.message}`);
+      }
+    }
+    throw new Error(errors.join("；"));
+  }
+  // 只有 PAT、没有 refresh token：直接兑换 job token
+  if (!refresh && pat) {
+    try {
+      return await patExchange();
+    } catch (e) {
+      errors.push(`PAT 兑换失败: ${e.message}`);
+    }
+  }
+  // 无前缀的旧数据按设备流处理
+  if (refresh && !refresh.startsWith("drt-")) {
+    try {
+      return await deviceRefresh();
+    } catch (e) {
+      errors.push(`设备令牌刷新失败: ${e.message}`);
+    }
+  }
+  throw new Error(errors.join("；") || "刷新失败");
+}
+
+async function postRefresh(url, body) {
   const result = await fetchJson(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: { refresh_token: account.refreshToken },
+    body,
     timeoutMs: 20000,
   });
-  if (!result.ok || !result.json) {
-    throw new Error(`刷新失败 HTTP ${result.status}: ${(result.text || "").slice(0, 200)}`);
+  if (!result.ok) {
+    throw new Error(`HTTP ${result.status}: ${(result.text || "").slice(0, 200)}`);
   }
-  const data = result.json;
-  const token = data.device_token || data.token || data.securityOauthToken;
+  return result.json || {};
+}
+
+function normalizeRefresh(raw, account) {
+  const data = raw.data && typeof raw.data === "object" ? raw.data : raw;
+  const token =
+    data.device_token || data.token || data.securityOauthToken || data.access_token || data.accessToken;
   if (!token) throw new Error("刷新响应缺少 token");
+  let tokenExpireAt = normalizeExpire(
+    data.expires_at ?? data.expireTime ?? data.expiresAt ?? null,
+  );
+  // jobToken 的 expires_in 单位是毫秒
+  const expiresIn = Number(data.expires_in ?? data.expiresIn);
+  if (!tokenExpireAt && Number.isFinite(expiresIn) && expiresIn > 0) {
+    tokenExpireAt = Date.now() + expiresIn;
+  }
   return {
     securityOauthToken: token,
-    refreshToken: data.refresh_token || data.refreshToken || account.refreshToken,
-    tokenExpireAt: normalizeExpire(data.expires_at || data.expireTime),
+    refreshToken:
+      data.refresh_token || data.refreshToken || data.refreshTokenValue || account.refreshToken,
+    tokenExpireAt,
     refreshTokenExpiresAt: normalizeExpire(
-      data.refresh_token_expires_at ?? data.refreshTokenExpiresAt ?? data.refreshTokenExpireAt,
+      data.refresh_token_expires_at ??
+        data.refreshTokenExpiresAt ??
+        data.refreshTokenExpireAt ??
+        data.refresh_expires_at ??
+        null,
     ),
   };
 }

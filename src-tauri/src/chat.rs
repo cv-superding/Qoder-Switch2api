@@ -536,6 +536,7 @@ fn legacy_stream(
         }
         let mut buffer = String::new();
         let mut stream = resp.bytes_stream();
+        let mut saw_done = false;
         use futures_util::StreamExt;
         loop {
             let chunk = match tokio::time::timeout(std::time::Duration::from_millis(timeout), stream.next()).await {
@@ -556,11 +557,22 @@ fn legacy_stream(
                 buffer = buffer[idx + 1..].to_string();
                 if let Some(data) = line.strip_prefix("data:") {
                     let data = data.trim();
+                    if data == "[DONE]" {
+                        saw_done = true;
+                        break;
+                    }
                     for event in parse_legacy_line(data) {
                         yield event;
                     }
                 }
             }
+            if saw_done {
+                break;
+            }
+        }
+        if !saw_done {
+            yield ChatEvent::Error("上游连接提前结束（未收到 [DONE]），响应可能不完整".into());
+            return;
         }
         yield ChatEvent::Done;
     }
@@ -858,7 +870,7 @@ fn cloud_stream(req: ChatRequest, edition: Edition) -> impl Stream<Item = ChatEv
                 }
             }
         }
-        yield ChatEvent::Done;
+        yield ChatEvent::Error("上游会话提前结束，响应可能不完整".into());
     }
 }
 

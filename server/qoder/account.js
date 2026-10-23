@@ -228,6 +228,8 @@ class AccountManager {
     return this.accounts.filter((a) => {
       if (a.edition !== edition) return false;
       if (a.status === "disabled") return false;
+      // 明确失效且没有任何续期手段的账号不再参与轮转，避免每次请求先吃一个 401
+      if (a.status === "needs_relogin" && !a.refreshToken && !a.pat) return false;
       if (this.isCooling(a.id)) return false;
       if (group === "proxy" && a.group === "desktop") return false;
       return Boolean(a.securityOauthToken || a.pat);
@@ -281,10 +283,10 @@ class AccountManager {
     }
   }
 
-  /** 尝试用 refresh_token 续期；成功写回并返回 true */
+  /** 尝试用 refresh_token / PAT 续期；成功写回并返回 true */
   async tryRefresh(id) {
     const account = this.get(id);
-    if (!account || !account.refreshToken) return false;
+    if (!account || (!account.refreshToken && !account.pat)) return false;
     const edition = EDITIONS[account.edition] || EDITIONS.domestic;
     try {
       const result = await refreshToken(edition, account);
@@ -299,7 +301,13 @@ class AccountManager {
       this.cooldowns.delete(id);
       return true;
     } catch (e) {
-      this.update(id, { status: "needs_relogin", lastError: `续期失败: ${e.message}` });
+      const message = String(e.message || e);
+      // 网络抖动/上游 5xx 不等于登录态失效，不要直接标 needs_relogin
+      const authFailure = /HTTP (401|403)|TOKEN_EXPIRE|Offline user session|invalid[_ ]?grant/i.test(message);
+      this.update(id, {
+        status: authFailure ? "needs_relogin" : account.status,
+        lastError: `续期失败: ${message}`,
+      });
       return false;
     }
   }
@@ -320,6 +328,8 @@ class AccountManager {
 function quotaScore(a) {
   const q = a.quota;
   if (!q) return 0;
+  // 已过期的旧额度快照不能继续排在最前面
+  if (typeof q.expiresAt === "number" && q.expiresAt > 0 && q.expiresAt < Date.now()) return 0;
   if (typeof q.remaining === "number" && typeof q.total === "number" && q.total > 0) {
     return q.remaining / q.total;
   }

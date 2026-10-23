@@ -32,7 +32,7 @@ function normalizeTime(raw) {
  */
 function authHeaders(account) {
   return {
-    Authorization: `Bearer ${account.pat || account.securityOauthToken}`,
+    Authorization: `Bearer ${account.securityOauthToken || account.pat}`,
     Accept: "application/json",
     "User-Agent": "Qoder",
     "Cosy-ClientType": "10",
@@ -51,28 +51,83 @@ function quotaPart(raw) {
   };
 }
 
+/** 专属资源包（活动奖励等），带独立过期时间 */
+function normalizePackages(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((p) => {
+      const total = Number(p?.total);
+      const remaining = Number(p?.remaining);
+      const used = Number(p?.used);
+      return {
+        id: String(p?.id ?? ""),
+        name: String(p?.name || p?.description || "专属资源包"),
+        total: Number.isFinite(total) ? total : null,
+        used: Number.isFinite(used) ? used : null,
+        remaining: Number.isFinite(remaining) ? remaining : null,
+        unit: String(p?.unit || ""),
+        expiresAt: normalizeTime(p?.expiresAt),
+        available: p?.available !== false,
+      };
+    })
+    .filter((p) => (p.total ?? 0) > 0 || (p.remaining ?? 0) > 0);
+}
+
+/** 组织/团队共享额度池：用 cap 表示总量，cap=-1 表示不设上限 */
+function normalizeShared(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const cap = Number(raw.cap ?? raw.total);
+  const remaining = Number(raw.remaining);
+  const used = Number(raw.used);
+  if (!Number.isFinite(cap) && !Number.isFinite(remaining)) return null;
+  return {
+    name: "共享额度",
+    total: Number.isFinite(cap) ? cap : null,
+    used: Number.isFinite(used) ? used : null,
+    remaining: Number.isFinite(remaining) ? remaining : null,
+    unit: String(raw.unit || ""),
+    available: raw.available !== false,
+    unlimited: Number.isFinite(cap) && cap < 0,
+  };
+}
+
 /**
- * 合并套餐额度与加油包（addOnQuota）。
+ * 合并套餐额度、加油包、专属资源包与组织共享池。
  * 上游 percentage 是「已用比例」，合并后的 percentage 保持同一语义。
  */
-function combineQuota(plan, addOn) {
+function combineQuota(plan, addOn, packages = [], shared = null) {
   // 上游可能返回 total=0 的空 addOnQuota，展示上没有意义
   if (addOn && !(Number(addOn.total) > 0) && !(Number(addOn.remaining) > 0)) addOn = null;
-  if (!plan && !addOn) return null;
-  if (!plan) return { ...addOn, plan: null, addOn };
-  if (!addOn) return { ...plan, plan, addOn: null };
-  const total = plan.total != null && addOn.total != null ? plan.total + addOn.total : null;
-  const used = plan.used != null && addOn.used != null ? plan.used + addOn.used : null;
-  const remaining =
-    plan.remaining != null && addOn.remaining != null ? plan.remaining + addOn.remaining : null;
+  const usablePackages = (packages || []).filter((p) => p.available !== false);
+  const usableShared = shared && shared.available !== false && !shared.unlimited ? shared : null;
+  if (!plan && !addOn && usablePackages.length === 0 && !usableShared && !shared) return null;
+
+  const pools = [plan, addOn, ...usablePackages, usableShared].filter(Boolean);
+  const sum = (key) => {
+    let total = 0;
+    let seen = false;
+    for (const pool of pools) {
+      const value = pool[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        total += value;
+        seen = true;
+      }
+    }
+    return seen ? total : null;
+  };
+  const total = sum("total");
+  const used = sum("used");
+  const remaining = sum("remaining");
   return {
     total,
     used,
     remaining,
-    percentage: total && used != null ? used / total : null,
-    unit: plan.unit || addOn.unit || "",
-    plan,
-    addOn,
+    percentage: total > 0 && used != null ? used / total : null,
+    unit: plan?.unit || addOn?.unit || usablePackages[0]?.unit || shared?.unit || "",
+    plan: plan || null,
+    addOn: addOn || null,
+    packages: packages || [],
+    shared,
   };
 }
 
@@ -89,7 +144,12 @@ export async function getQuotaUsage(edition, account) {
     totalUsagePercentage: data.totalUsagePercentage ?? null,
     isQuotaExceeded: Boolean(data.isQuotaExceeded),
     expiresAt: normalizeTime(data.expiresAt),
-    quota: combineQuota(quotaPart(data.userQuota), quotaPart(data.addOnQuota)),
+    quota: combineQuota(
+      quotaPart(data.userQuota),
+      quotaPart(data.addOnQuota),
+      normalizePackages(data.dedicatedResourcePackages),
+      normalizeShared(data.orgResourcePackage),
+    ),
   };
 }
 
@@ -120,11 +180,13 @@ export async function getMeUsage(edition, account) {
   return result.json;
 }
 
-/** 活动列表（每日签到以 campaign 形式存在）：/sash/api/v1/me/campaigns */
+/**
+ * 活动列表（每日签到以 campaign 形式存在）：/sash/api/v1/me/campaigns
+ * 官方客户端不带 forceRefresh：带上它会让未打开过活动页的账号只返回
+ * VIEW_DETAILS 行，每日 CLAIM_BENEFIT 行被服务端过滤掉。
+ */
 export async function listCampaigns(edition, account) {
-  const path = edition.oauth.campaignsPath;
-  const url = openApi(edition, path) + (path.includes("?") ? "&" : "?") + "forceRefresh=true";
-  const result = await fetchJson(url, {
+  const result = await fetchJson(openApi(edition, edition.oauth.campaignsPath), {
     headers: authHeaders(account),
     timeoutMs: 20000,
   });
@@ -204,14 +266,15 @@ export function findClaimableCheckin(campaigns, now = Date.now()) {
 
 /**
  * 今日是否已签到：只认签到类（CLAIM_BENEFIT）活动。
- * VIEW_DETAILS 等营销活动即使 CLAIMED 也不代表领取了积分。
+ * 部分老活动领取后会降级为 VIEW_DETAILS 但仍保留 CREDITS 金额，也算已签；
+ * 纯营销 VIEW_DETAILS（没有积分金额）不算。
  */
 export function todayCheckedIn(campaigns) {
   return (campaigns || []).some((c) => {
     if (!["CLAIMED", "REPLAYED"].includes(campaignStatus(c))) return false;
     const action = campaignAction(c);
     if (action === "CLAIM_BENEFIT") return true;
-    return action === "" && campaignKind(c) === "CREDITS";
+    return (action === "" || action === "VIEW_DETAILS") && campaignKind(c) === "CREDITS" && campaignAmount(c) > 0;
   });
 }
 
@@ -255,6 +318,9 @@ export async function claimCampaign(edition, account, campaignId) {
   if (status === "BLOCKED") throw new Error("活动暂不可领取，请稍后再试");
   if (body.replayed === true || payload.replayed === true) {
     return { success: true, replayed: true, rewardCredit: null };
+  }
+  if (status && !["CLAIMED", "GRANTED", "SUCCESS"].includes(status)) {
+    throw new Error(`上游未确认领取成功（status=${status}）`);
   }
   const reward = Number(body.benefit?.amount ?? body.rewardCredit ?? body.credit ?? 0);
   return {
