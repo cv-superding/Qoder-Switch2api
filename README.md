@@ -172,6 +172,16 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 更新日志
 
+### v1.1.20
+
+- 修复 v1.1.19 把 Qoder SSE 正常结束（无 `[DONE]`）误判为截断，导致真实反代请求返回 502
+- OpenAI Chat Completions 改为真流式输出：Node 与 Rust 都按上游 chunk 实时下发，首字延迟从整段生成后降到约 1 秒；支持流中换号、客户端断连即停止上游
+- 自动签到在独立服务模式（`qoder-server.exe`）也会启动调度，不再只是设置页开关；默认改为 10:00（活动刷新时间），未成功持续重试，无凭证账号跳过，执行前自动续期
+- 设置页新增「上次自动签到」结果与「Token 自动续期」开关及上次续期结果
+- 新增 Token 自动续期：每 6 小时检查反代账号，48 小时内过期的 Token 自动续期；跳过客户端当前账号和桌面端专用账号，避免登录态互相覆盖
+- 签到成功后积分、签到状态、日志同步刷新；Rust 端补充自动签到/续期状态接口
+- 参考项目扩充到 12 个，新增 QoderGateway、Qoder-Daily、qoder-checkin 等签到与网关实现
+
 ### v1.1.19
 
 - 修复签到活动列表被 `forceRefresh` 过滤：未打开过活动页的账号不再只返回营销活动，每日签到行可正常出现
@@ -323,10 +333,18 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 致谢
 
-- [WorkBuddy-Switch2api](https://github.com/cv-superding/WorkBuddy-Switch2api) — 界面与架构参考
-- [qoder2api](https://github.com/jyao0708/qoder2api) — Qoder Cosy/Cloud 协议参考
-- [Qoder-Switch](https://github.com/70548887/Qoder-Switch) — 客户端切换与会话管理参考
-- [cpa-multi-plugins](https://github.com/lg996/cpa-multi-plugins) / [dsh-qoder-connect](https://github.com/YSwo-fei/dsh-qoder-connect) — Qoder CN 端点交叉验证
+- [WorkBuddy-Switch2api](https://github.com/cv-superding/WorkBuddy-Switch2api) — 界面、托盘与账号切换架构
+- [qoder2api](https://github.com/jyao0708/qoder2api) / [Zhengyuuuui/qoder2api](https://github.com/Zhengyuuuui/qoder2api) — Cosy/Cloud 协议与额度桶
+- [qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub) — 额度、活动与桌面身份
+- [cpa-multi-plugins](https://github.com/lg996/cpa-multi-plugins) — 签到方言、额度资源包与冷却
+- [Qoder-Switch](https://github.com/70548887/Qoder-Switch) — 客户端切换、会话与流量管理
+- [qoder-trae-workbuddy-switch](https://github.com/NextAgentX/qoder-trae-workbuddy-switch) — 托盘、保活与多产品账号
+- [JIUSHIQINGSHAN/qoder-switch](https://github.com/JIUSHIQINGSHAN/qoder-switch) — 资源包与到期展示
+- [QoderGateway](https://github.com/bzym2/QoderGateway) — OpenAI 兼容网关、Token 定时续期
+- [Qoder-Daily](https://github.com/L0NE-6/Qoder-Daily) — 每日签到、活动窗口与推送
+- [wallechfox/qoder-checkin](https://github.com/wallechfox/qoder-checkin) — 多账号签到与结果判定
+- [qinfyy/Qoder2Api](https://github.com/qinfyy/Qoder2Api) — 新版 Cosy 签名与模型目录
+- [dsh-qoder-connect](https://github.com/YSwo-fei/dsh-qoder-connect) — Qoder CN 端点交叉验证
 
 ## 免责声明
 

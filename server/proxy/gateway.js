@@ -27,6 +27,230 @@ const DEFAULT_MODELS = [
 let modelListCache = { domestic: { at: 0, models: [] }, international: { at: 0, models: [] } };
 const MODEL_CACHE_MS = 10 * 60 * 1000;
 
+/**
+ * 真正的流式选号：首个内容事件前允许换号，一旦开始输出就不再切换。
+ * onPick 在选定账号时立即回调，便于记录失败用量。
+ */
+async function* streamChatEvents(edition, model, req, onPick) {
+  const editionValue = edition.value;
+  const { key: upstreamModel, effort: modelEffort } = resolveModelRequest(model);
+  const reasoningEffort = req.reasoningEffort || modelEffort;
+  let lastError = "没有可用账号";
+  let lastStatus = 503;
+  let lastAccount = null;
+  for (let i = 0; i < 3; i += 1) {
+    const account = accountManager.pick(editionValue);
+    if (!account) {
+      yield { type: "failed", error: lastError, status: lastStatus, account: lastAccount };
+      return;
+    }
+    lastAccount = account;
+    onPick?.(account);
+    if (account.tokenExpireAt && account.tokenExpireAt < Date.now() + 5 * 60 * 1000 && account.refreshToken) {
+      await accountManager.tryRefresh(account.id);
+    }
+    const current = accountManager.get(account.id) || account;
+    let started = false;
+    let failed = null;
+    try {
+      for await (const event of streamChat({
+        account: current,
+        edition,
+        model: upstreamModel,
+        messages: req.messages,
+        tools: req.tools,
+        imageUrls: req.imageUrls,
+        api: req.api,
+        reasoningEffort,
+        thinkingType: req.thinkingType,
+        thinkingBudget: req.thinkingBudget,
+      })) {
+        if (event.type === "error") {
+          failed = event.error;
+          break;
+        }
+        if (event.type !== "usage") started = true;
+        yield event;
+      }
+    } catch (e) {
+      failed = String(e.message || e);
+    }
+    if (!failed) {
+      accountManager.markSuccess(current.id);
+      return;
+    }
+    const statusMatch = /HTTP (\d{3})/.exec(failed);
+    const statusCode = statusMatch ? Number(statusMatch[1]) : 0;
+    if ([400, 404, 413, 415, 422].includes(statusCode)) {
+      yield {
+        type: "failed",
+        error: `${failed}（模型 ${model} 拒绝了请求，请检查上下文长度、工具/参数兼容性或更换模型）`,
+        status: statusCode,
+        account: current,
+      };
+      return;
+    }
+    accountManager.markFailure(current.id, statusCode, failed);
+    if (statusCode === 401 || statusCode === 403) {
+      await accountManager.tryRefresh(current.id);
+    }
+    if (started) {
+      yield { type: "error", error: failed };
+      return;
+    }
+    lastError = failed;
+    lastStatus = statusCode >= 400 && statusCode < 600 ? statusCode : 502;
+  }
+  yield { type: "failed", error: lastError, status: lastStatus, account: lastAccount };
+}
+
+/** OpenAI Chat Completions 真流式输出 */
+function streamChatCompletion({ res, edition, editionValue, model, messages, started, request }) {
+  const completionId = `chatcmpl-${randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  let account = null;
+  let headSent = false;
+  let clientClosed = false;
+  let usage = null;
+  let content = "";
+  let reasoning = "";
+  let toolCalls = [];
+  const send = (obj) => {
+    if (!clientClosed) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  };
+  const ensureHead = () => {
+    if (headSent || clientClosed) return;
+    headSent = true;
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    send({
+      id: completionId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+    });
+  };
+  res.on("close", () => {
+    clientClosed = true;
+  });
+
+  (async () => {
+    try {
+      for await (const event of streamChatEvents(edition, model, request, (picked) => {
+        account = picked;
+      })) {
+        if (clientClosed) break;
+        if (event.type === "failed" || event.type === "error") {
+          const error = event.error || "上游请求失败";
+          if (!headSent) {
+            recordUsage({
+              edition: editionValue,
+              accountId: account?.id || "",
+              accountName: accountDisplayName(account),
+              model,
+              success: false,
+              error,
+              durationMs: Date.now() - started,
+              api: "chat",
+            });
+            res.status(event.status || 502).json(openAiError("upstream_error", error, event.status || 502));
+          } else {
+            send({ error: { message: error, type: "upstream_error" } });
+            recordUsage({
+              edition: editionValue,
+              accountId: account?.id || "",
+              accountName: accountDisplayName(account),
+              model,
+              success: false,
+              error,
+              durationMs: Date.now() - started,
+              api: "chat",
+            });
+            res.end();
+          }
+          return;
+        }
+        ensureHead();
+        if (event.type === "content") {
+          content += event.text;
+          send({
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [{ index: 0, delta: { content: event.text }, finish_reason: null }],
+          });
+        } else if (event.type === "reasoning") {
+          reasoning += event.text;
+          send({
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [{ index: 0, delta: { reasoning_content: event.text }, finish_reason: null }],
+          });
+        } else if (event.type === "tool_calls") {
+          toolCalls = mergeToolCalls(toolCalls, event.toolCalls);
+          send({
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [{ index: 0, delta: { tool_calls: event.toolCalls }, finish_reason: null }],
+          });
+        } else if (event.type === "usage") {
+          usage = event.usage;
+        }
+      }
+      ensureHead();
+      send({
+        id: completionId,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop" }],
+      });
+      if (!clientClosed) {
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+      recordUsage({
+        edition: editionValue,
+        accountId: account?.id || "",
+        accountName: accountDisplayName(account),
+        model,
+        ...tokenUsage(usage, messages, content),
+        durationMs: Date.now() - started,
+        success: true,
+        api: "chat",
+      });
+    } catch (e) {
+      const error = String(e.message || e);
+      if (!headSent) {
+        recordUsage({
+          edition: editionValue,
+          accountId: account?.id || "",
+          accountName: accountDisplayName(account),
+          model,
+          success: false,
+          error,
+          durationMs: Date.now() - started,
+          api: "chat",
+        });
+        res.status(502).json(openAiError("upstream_error", error, 502));
+      } else {
+        send({ error: { message: error, type: "upstream_error" } });
+        res.end();
+      }
+    }
+  })();
+}
+
 export function createGateway(edition, getProxyConfig) {
   const editionValue = edition.value;
   const app = express();
@@ -140,7 +364,7 @@ export function createGateway(edition, getProxyConfig) {
     const messages = normalizeMessages(body.messages || []);
     const imageUrls = collectImageUrls(messages);
 
-    const attempt = await runWithAccount(edition, model, {
+    const upstreamRequest = {
       messages,
       tools: body.tools,
       reasoningEffort: body.reasoning_effort,
@@ -148,7 +372,13 @@ export function createGateway(edition, getProxyConfig) {
       thinkingBudget: body.thinking?.budget_tokens,
       imageUrls,
       api: "chat",
-    });
+    };
+
+    if (wantStream) {
+      return streamChatCompletion({ res, edition, editionValue, model, messages, started, request: upstreamRequest });
+    }
+
+    const attempt = await runWithAccount(edition, model, upstreamRequest);
     if (!attempt.ok) {
       recordUsage({
         edition: editionValue,
@@ -166,114 +396,40 @@ export function createGateway(edition, getProxyConfig) {
     const { account, events } = attempt;
     const completionId = `chatcmpl-${randomUUID()}`;
     const created = Math.floor(Date.now() / 1000);
-
-    if (!wantStream) {
-      const { content, reasoning, toolCalls, usage } = aggregate(events);
-      const tokens = tokenUsage(usage, messages, content);
-      recordUsage({
-        edition: editionValue,
-        accountId: account.id,
-        accountName: accountDisplayName(account),
-        model,
-        ...tokens,
-        durationMs: Date.now() - started,
-        success: true,
-        api: "chat",
-      });
-      return res.json({
-        id: completionId,
-        object: "chat.completion",
-        created,
-        model,
-        choices: [
-          {
-            index: 0,
-            message: {
-              role: "assistant",
-              content: content || null,
-              ...(reasoning ? { reasoning_content: reasoning } : {}),
-              ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-            },
-            finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
-          },
-        ],
-        usage: {
-          prompt_tokens: tokens.promptTokens,
-          completion_tokens: tokens.completionTokens,
-          total_tokens: tokens.totalTokens,
-        },
-      });
-    }
-
-    // 流式
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    });
-    const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
-    send({
-      id: completionId,
-      object: "chat.completion.chunk",
-      created,
-      model,
-      choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
-    });
-    let usage = null;
-    let content = "";
-    let reasoning = "";
-    let toolCalls = [];
-    for (const event of events) {
-      if (event.type === "content") {
-        content += event.text;
-        send({
-          id: completionId,
-          object: "chat.completion.chunk",
-          created,
-          model,
-          choices: [{ index: 0, delta: { content: event.text }, finish_reason: null }],
-        });
-      } else if (event.type === "reasoning") {
-        reasoning += event.text;
-        send({
-          id: completionId,
-          object: "chat.completion.chunk",
-          created,
-          model,
-          choices: [{ index: 0, delta: { reasoning_content: event.text }, finish_reason: null }],
-        });
-      } else if (event.type === "tool_calls") {
-        toolCalls = mergeToolCalls(toolCalls, event.toolCalls);
-        send({
-          id: completionId,
-          object: "chat.completion.chunk",
-          created,
-          model,
-          choices: [{ index: 0, delta: { tool_calls: event.toolCalls }, finish_reason: null }],
-        });
-      } else if (event.type === "usage") {
-        usage = event.usage;
-      }
-    }
-    send({
-      id: completionId,
-      object: "chat.completion.chunk",
-      created,
-      model,
-      choices: [{ index: 0, delta: {}, finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop" }],
-    });
-    res.write("data: [DONE]\n\n");
-    res.end();
+    const { content, reasoning, toolCalls, usage } = aggregate(events);
+    const tokens = tokenUsage(usage, messages, content);
     recordUsage({
       edition: editionValue,
       accountId: account.id,
       accountName: accountDisplayName(account),
       model,
-      ...tokenUsage(usage, messages, content),
+      ...tokens,
       durationMs: Date.now() - started,
       success: true,
       api: "chat",
+    });
+    return res.json({
+      id: completionId,
+      object: "chat.completion",
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: content || null,
+            ...(reasoning ? { reasoning_content: reasoning } : {}),
+            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+          },
+          finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+        },
+      ],
+      usage: {
+        prompt_tokens: tokens.promptTokens,
+        completion_tokens: tokens.completionTokens,
+        total_tokens: tokens.totalTokens,
+      },
     });
   });
 
@@ -523,6 +679,8 @@ async function runWithAccount(edition, model, req) {
         imageUrls: req.imageUrls,
         api: req.api,
         reasoningEffort,
+        thinkingType: req.thinkingType,
+        thinkingBudget: req.thinkingBudget,
       })) {
         if (event.type === "error") {
           failed = event.error;

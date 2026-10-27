@@ -567,6 +567,216 @@ fn record(
 
 /* ---------------- Chat Completions ---------------- */
 
+/// OpenAI Chat Completions 真流式：首个内容事件前允许换号，之后直接转发
+async fn chat_stream(
+    state: Arc<AppState>,
+    edition_value: String,
+    model: String,
+    messages: Vec<Value>,
+    tools: Option<Value>,
+    image_urls: Vec<String>,
+    reasoning_effort: Option<String>,
+    thinking_type: Option<String>,
+    thinking_budget: Option<i64>,
+) -> Response {
+    let (tx, rx) = mpsc::channel::<Result<String, std::io::Error>>(64);
+    tokio::spawn(async move {
+        let started_at = std::time::Instant::now();
+        let completion_id = format!("chatcmpl-{}", uuid_simple());
+        let created = now_secs();
+        let (upstream_model, suffix_effort) = resolve_model_request(&model);
+        let effective_effort = reasoning_effort.clone().or(suffix_effort);
+        let mut last_error = "没有可用账号".to_string();
+        let mut last_account = (String::new(), String::new());
+        macro_rules! send_json {
+            ($obj:expr) => {
+                if tx.send(Ok(format!("data: {}\n\n", $obj.to_string()))).await.is_err() {
+                    return;
+                }
+            };
+        }
+        macro_rules! role_chunk {
+            () => {
+                send_json!(json!({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{ "index": 0, "delta": { "role": "assistant" }, "finish_reason": null }]
+                }));
+            };
+        }
+        for _attempt in 0..3 {
+            let (edition, account) = {
+                let mut accounts = state.accounts.write().await;
+                let config = state.proxy_config(&edition_value).await;
+                let account = accounts.pick(&edition_value, &config.account_group);
+                let edition = state.effective_edition(&edition_value).await;
+                (edition, account)
+            };
+            let Some(account) = account else { break; };
+            last_account = (account.id.clone(), account_display_name(&account));
+            let mut current = account.clone();
+            let expires_soon = current
+                .token_expire_at
+                .map(|t| t < crate::crypto::now_ms() + 5 * 60 * 1000)
+                .unwrap_or(false);
+            if expires_soon && !current.refresh_token.is_empty() {
+                let _ = crate::account::try_refresh_account(&state.accounts, &current.id).await;
+                if let Some(latest) = state.accounts.read().await.get(&current.id).cloned() {
+                    current = latest;
+                }
+            }
+            let mut started = false;
+            let mut content = String::new();
+            let mut usage: Option<TokenUsage> = None;
+            let mut has_tools = false;
+            let mut failed: Option<String> = None;
+            let request = ChatRequest {
+                account: current.clone(),
+                model: upstream_model.clone(),
+                messages: messages.clone(),
+                tools: tools.clone(),
+                reasoning_effort: effective_effort.clone(),
+                thinking_type: thinking_type.clone(),
+                thinking_budget,
+                image_urls: image_urls.clone(),
+                workspace_root: String::new(),
+                timeout_ms: 300_000,
+            };
+            let mut stream = Box::pin(stream_chat(request, edition));
+            while let Some(event) = stream.next().await {
+                match event {
+                    ChatEvent::Error(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                    ChatEvent::Content(t) => {
+                        if !started {
+                            role_chunk!();
+                            started = true;
+                        }
+                        content.push_str(&t);
+                        send_json!(json!({
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{ "index": 0, "delta": { "content": t }, "finish_reason": null }]
+                        }));
+                    }
+                    ChatEvent::Reasoning(t) => {
+                        if !started {
+                            role_chunk!();
+                            started = true;
+                        }
+                        send_json!(json!({
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{ "index": 0, "delta": { "reasoning_content": t }, "finish_reason": null }]
+                        }));
+                    }
+                    ChatEvent::ToolCalls(tc) => {
+                        if !started {
+                            role_chunk!();
+                            started = true;
+                        }
+                        has_tools = true;
+                        send_json!(json!({
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{ "index": 0, "delta": { "tool_calls": tc }, "finish_reason": null }]
+                        }));
+                    }
+                    ChatEvent::Usage(u) => usage = Some(u),
+                    ChatEvent::Done => {}
+                }
+            }
+            drop(stream);
+            if failed.is_none() {
+                state.accounts.write().await.mark_success(&current.id);
+                if !started {
+                    role_chunk!();
+                }
+                send_json!(json!({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{ "index": 0, "delta": {}, "finish_reason": if has_tools { "tool_calls" } else { "stop" } }]
+                }));
+                let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+                record(
+                    &edition_value,
+                    &current.id,
+                    &account_display_name(&current),
+                    &model,
+                    usage.as_ref(),
+                    &messages,
+                    &content,
+                    "chat",
+                    started_at.elapsed().as_millis() as i64,
+                    true,
+                    "",
+                );
+                return;
+            }
+            let error = failed.unwrap_or_default();
+            let code = parse_status_code(&error);
+            state.accounts.write().await.mark_failure(&current.id, code, &error);
+            if code == 401 || code == 403 {
+                let _ = crate::account::try_refresh_account(&state.accounts, &current.id).await;
+            }
+            if started || matches!(code, 400 | 404 | 413 | 415 | 422) {
+                send_json!(json!({ "error": { "message": error, "type": "api_error", "code": "upstream_error", "status": code } }));
+                let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+                record(
+                    &edition_value,
+                    &current.id,
+                    &account_display_name(&current),
+                    &model,
+                    usage.as_ref(),
+                    &messages,
+                    &content,
+                    "chat",
+                    started_at.elapsed().as_millis() as i64,
+                    false,
+                    &error,
+                );
+                return;
+            }
+            last_error = error;
+        }
+        send_json!(json!({ "error": { "message": last_error, "type": "api_error", "code": "upstream_error", "status": 502 } }));
+        let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+        record(
+            &edition_value,
+            &last_account.0,
+            &last_account.1,
+            &model,
+            None,
+            &messages,
+            "",
+            "chat",
+            started_at.elapsed().as_millis() as i64,
+            false,
+            &last_error,
+        );
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("X-Accel-Buffering", "no")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
 async fn chat_completions(
     State((state, edition_value)): State<(Arc<AppState>, String)>,
     Json(body): Json<Value>,
@@ -576,6 +786,21 @@ async fn chat_completions(
     let want_stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     let messages = normalize_messages(body.get("messages"));
     let image_urls = collect_image_urls(&messages);
+
+    if want_stream {
+        return chat_stream(
+            state,
+            edition_value,
+            model,
+            messages,
+            body.get("tools").cloned(),
+            image_urls,
+            body.get("reasoning_effort").and_then(|v| v.as_str()).map(|v| v.to_string()),
+            body.get("thinking").and_then(|v| v.get("type")).and_then(|v| v.as_str()).map(|v| v.to_string()),
+            body.get("thinking").and_then(|v| v.get("budget_tokens")).and_then(|v| v.as_i64()),
+        )
+        .await;
+    }
 
     let result = run_with_account(
         &state,
@@ -663,92 +888,7 @@ async fn chat_completions(
         }))
         .into_response();
     }
-
-    // 流式：通过 mpsc 推送
-    let (tx, rx) = mpsc::channel::<Result<String, std::io::Error>>(64);
-    let edition_value_clone = edition_value.clone();
-    let account_id = result.account_id.clone();
-    let account_name = result.account_name.clone();
-    let model_clone = model.clone();
-    tokio::spawn(async move {
-        let mut tx = tx;
-        macro_rules! send {
-            ($obj:expr) => {
-                let _ = tx.send(Ok(format!("data: {}\n\n", $obj.to_string()))).await;
-            };
-        }
-        send!(json!({
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model_clone,
-            "choices": [{ "index": 0, "delta": { "role": "assistant" }, "finish_reason": null }]
-        }));
-        let mut usage_final: Option<TokenUsage> = None;
-        for event in &result.events {
-            match event {
-                ChatEvent::Content(t) => {
-                    send!(json!({
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model_clone,
-                        "choices": [{ "index": 0, "delta": { "content": t }, "finish_reason": null }]
-                    }));
-                }
-                ChatEvent::Reasoning(t) => {
-                    send!(json!({
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model_clone,
-                        "choices": [{ "index": 0, "delta": { "reasoning_content": t }, "finish_reason": null }]
-                    }));
-                }
-                ChatEvent::ToolCalls(tc) => {
-                    send!(json!({
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model_clone,
-                        "choices": [{ "index": 0, "delta": { "tool_calls": tc }, "finish_reason": null }]
-                    }));
-                }
-                ChatEvent::Usage(u) => usage_final = Some(u.clone()),
-                _ => {}
-            }
-        }
-        send!(json!({
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model_clone,
-            "choices": [{ "index": 0, "delta": {}, "finish_reason": if tool_calls.is_empty() { "stop" } else { "tool_calls" } }]
-        }));
-        let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
-        record(
-            &edition_value_clone,
-            &account_id,
-            &account_name,
-            &model_clone,
-            usage_final.as_ref(),
-            &messages,
-            &content,
-            "chat",
-            duration,
-            true,
-            "",
-        );
-    });
-
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header("X-Accel-Buffering", "no")
-        .body(Body::from_stream(stream))
-        .unwrap()
+    unreachable!("want_stream handled above")
 }
 
 /* ---------------- Responses（Codex CLI） ---------------- */

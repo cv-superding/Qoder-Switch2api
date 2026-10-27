@@ -41,6 +41,8 @@ pub fn create_api_router(state: Arc<AppState>) -> Router {
         .route("/accounts/checkin", post(checkin_accounts))
         .route("/checkin/status", get(get_checkin_status))
         .route("/checkin/logs", get(get_checkin_logs))
+        .route("/checkin/auto/status", get(get_auto_checkin_status))
+        .route("/keepalive/status", get(get_keepalive_status))
         .route("/oauth/start", post(oauth_start))
         .route("/oauth/open-url", post(open_url))
         .route("/oauth/poll/{login_id}", get(oauth_poll))
@@ -539,6 +541,30 @@ async fn get_checkin_status(State(state): State<Arc<AppState>>) -> Response {
     ok_json(json!({ "accounts": results }))
 }
 
+async fn get_keepalive_status(State(state): State<Arc<AppState>>) -> Response {
+    let enabled = {
+        let settings = state.settings.read().await;
+        settings.token_keepalive
+    };
+    let last: Value = crate::store::load_json("keepalive-state.json");
+    ok_json(json!({
+        "enabled": enabled,
+        "last": if last.get("result").is_some() { last } else { Value::Null }
+    }))
+}
+
+async fn get_auto_checkin_status(State(state): State<Arc<AppState>>) -> Response {
+    let (enabled, hour) = {
+        let settings = state.settings.read().await;
+        (settings.auto_checkin.enabled, settings.auto_checkin.hour)
+    };
+    let last: Value = crate::store::load_json("checkin-state.json");
+    ok_json(json!({
+        "autoCheckin": { "enabled": enabled, "hour": hour },
+        "last": if last.get("result").is_some() { last } else { Value::Null }
+    }))
+}
+
 async fn get_checkin_logs() -> Response {
     ok_json(json!({ "logs": read_jsonl("checkin.jsonl", 200) }))
 }
@@ -857,6 +883,9 @@ async fn save_settings(State(state): State<Arc<AppState>>, Json(body): Json<Valu
     if let Some(close_to_tray) = incoming.get("closeToTray").and_then(|v| v.as_bool()) {
         settings.close_to_tray = close_to_tray;
         crate::CLOSE_TO_TRAY.store(close_to_tray, std::sync::atomic::Ordering::SeqCst);
+    }
+    if let Some(keepalive) = incoming.get("tokenKeepalive").and_then(|v| v.as_bool()) {
+        settings.token_keepalive = keepalive;
     }
     if let Some(v) = incoming.get("clientDirOverrides").and_then(|v| v.as_object()) {
         settings.client_dir_overrides.clear();

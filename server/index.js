@@ -10,7 +10,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadJson, appendJsonl } from "./store.js";
+import { loadJson, saveJson, appendJsonl } from "./store.js";
 import { ensureDataDir } from "./paths.js";
 import { EDITIONS } from "./editions.js";
 import { createApiRouter } from "./routes/api.js";
@@ -28,6 +28,7 @@ function defaultSettings() {
   return {
     theme: "light",
     closeToTray: true,
+    tokenKeepalive: true,
     clientDirOverrides: { domestic: "", international: "" },
     clientExePaths: { domestic: "", international: "" },
     autoCheckin: { enabled: false, hour: 10 },
@@ -169,6 +170,46 @@ function proxyStatus(editionValue) {
   };
 }
 
+/* ---------------- Token 自动续期 ---------------- */
+
+let keepaliveRunning = false;
+
+async function runTokenKeepalive() {
+  if (!settings.tokenKeepalive || keepaliveRunning) return;
+  keepaliveRunning = true;
+  let refreshed = 0;
+  let failed = 0;
+  try {
+    const now = Date.now();
+    const currentUids = new Set(
+      Object.values(accountManager.clientCurrent || {})
+        .filter(Boolean)
+        .map((c) => c.uid)
+        .filter(Boolean),
+    );
+    for (const summary of accountManager.list()) {
+      if (summary.status === "disabled" || summary.group === "desktop") continue;
+      if (currentUids.has(summary.uid)) continue;
+      const full = accountManager.get(summary.id);
+      if (!full?.refreshToken) continue;
+      // 只续期 48 小时内会过期的账号，避免无谓地轮换 refresh token
+      if (typeof full.tokenExpireAt === "number" && full.tokenExpireAt > now + 48 * 3600 * 1000) continue;
+      if (await accountManager.tryRefresh(full.id)) refreshed += 1;
+      else failed += 1;
+    }
+    saveJson("keepalive-state.json", { at: Date.now(), refreshed, failed });
+    if (refreshed > 0) console.log(`[keepalive] 已续期 ${refreshed} 个账号`);
+  } finally {
+    keepaliveRunning = false;
+  }
+}
+
+function scheduleTokenKeepalive() {
+  // 启动 1 分钟后先跑一次，之后每 6 小时检查
+  setTimeout(() => void runTokenKeepalive(), 60 * 1000);
+  setInterval(() => void runTokenKeepalive(), 6 * 3600 * 1000);
+}
+
 /* ---------------- 自动签到 ---------------- */
 
 let lastCheckinDay = "";
@@ -187,6 +228,9 @@ async function runAutoCheckin(force = false) {
   const accounts = accountManager.list().filter((a) => a.status !== "disabled");
   let failed = false;
   let pending = 0;
+  let claimedCount = 0;
+  let replayedCount = 0;
+  let failedCount = 0;
   for (const account of accounts) {
     let full = accountManager.get(account.id);
     // 没有登录凭证或明确失效的账号跳过，避免整点后每 10 分钟重复报同一个错
@@ -222,6 +266,7 @@ async function runAutoCheckin(force = false) {
           }
         } catch (e) {
           failed = true;
+          failedCount += 1;
           appendJsonl("checkin.jsonl", {
             accountId: account.id,
             edition: account.edition,
@@ -231,6 +276,8 @@ async function runAutoCheckin(force = false) {
           });
         }
       }
+      if (anyClaimed) claimedCount += 1;
+      if (anyReplayed) replayedCount += 1;
       if (anyClaimed || anyReplayed) {
         appendJsonl("checkin.jsonl", {
           accountId: account.id,
@@ -248,6 +295,7 @@ async function runAutoCheckin(force = false) {
         continue;
       }
       failed = true;
+      failedCount += 1;
       appendJsonl("checkin.jsonl", {
         accountId: account.id,
         edition: account.edition,
@@ -260,6 +308,25 @@ async function runAutoCheckin(force = false) {
   // 失败不盖章，下一轮重试；没有活动时最多重试到配置时间后 2 小时再收工
   const graceHour = Math.min(hour + 2, 23);
   if (!failed && (pending === 0 || now.getHours() >= graceHour)) lastCheckinDay = today;
+  const result = failed
+    ? claimedCount + replayedCount > 0
+      ? "partial"
+      : "failed"
+    : claimedCount > 0
+      ? "success"
+      : replayedCount > 0
+        ? "already"
+        : "idle";
+  saveJson("checkin-state.json", {
+    at: Date.now(),
+    day: today,
+    result,
+    claimed: claimedCount,
+    replayed: replayedCount,
+    failed: failedCount,
+    pending,
+    hour,
+  });
 }
 
 function scheduleAutoCheckin() {
@@ -301,6 +368,7 @@ app.listen(WEB_PORT, "127.0.0.1", () => {
   refreshProxyServers();
   scheduleAutoCheckin();
   void runAutoCheckin();
+  scheduleTokenKeepalive();
 });
 
 /* 生效 edition 暴露给 api 路由（OAuth / 信息查询用） */

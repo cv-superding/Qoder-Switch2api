@@ -570,10 +570,8 @@ fn legacy_stream(
                 break;
             }
         }
-        if !saw_done {
-            yield ChatEvent::Error("上游连接提前结束（未收到 [DONE]），响应可能不完整".into());
-            return;
-        }
+        // 旧版 Qoder SSE 正常结束时可能没有 [DONE]，EOF 即完成
+        let _ = saw_done;
         yield ChatEvent::Done;
     }
 }
@@ -870,7 +868,7 @@ fn cloud_stream(req: ChatRequest, edition: Edition) -> impl Stream<Item = ChatEv
                 }
             }
         }
-        yield ChatEvent::Error("上游会话提前结束，响应可能不完整".into());
+        yield ChatEvent::Done;
     }
 }
 

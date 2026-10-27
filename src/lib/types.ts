@@ -151,6 +151,27 @@ export interface PlanInfo {
   endDate: number | null;
 }
 
+export interface AutoCheckinLast {
+  at: number;
+  day: string;
+  result: "success" | "partial" | "failed" | "already" | "idle";
+  claimed: number;
+  replayed: number;
+  failed: number;
+  pending: number;
+  hour: number;
+}
+
+export interface KeepaliveStatus {
+  enabled: boolean;
+  last: { at: number; refreshed: number; failed: number } | null;
+}
+
+export interface AutoCheckinStatus {
+  autoCheckin: { enabled: boolean; hour: number };
+  last: AutoCheckinLast | null;
+}
+
 export interface UpdateInfo {
   currentVersion: string;
   latestVersion: string;
@@ -203,6 +224,7 @@ export interface ChatItem {
 export interface Settings {
   theme: "light" | "dark" | "system";
   closeToTray: boolean;
+  tokenKeepalive: boolean;
   clientDirOverrides: { domestic: string; international: string };
   clientExePaths: { domestic: string; international: string };
   autoCheckin: { enabled: boolean; hour: number };

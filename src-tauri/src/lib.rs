@@ -278,8 +278,66 @@ async fn static_handler(uri: Uri) -> Response {
     (StatusCode::NOT_FOUND, "前端尚未构建（npm run build）").into_response()
 }
 
+/// Token 自动续期：只处理反代账号中 48 小时内过期、且不是客户端当前账号的 Token
+pub async fn schedule_token_keepalive(state: Arc<AppState>) {
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    loop {
+        let enabled = {
+            let settings = state.settings.read().await;
+            settings.token_keepalive
+        };
+        if enabled {
+            let (refreshed, failed) = run_token_keepalive(&state).await;
+            crate::store::save_json(
+                "keepalive-state.json",
+                &serde_json::json!({ "at": crate::crypto::now_ms(), "refreshed": refreshed, "failed": failed }),
+            );
+            if refreshed > 0 {
+                println!("[keepalive] 已续期 {} 个账号", refreshed);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+    }
+}
+
+async fn run_token_keepalive(state: &Arc<AppState>) -> (usize, usize) {
+    let (accounts, current_uids) = {
+        let manager = state.accounts.read().await;
+        let uids = manager
+            .client_current
+            .values()
+            .flatten()
+            .map(|c| c.uid.clone())
+            .collect::<std::collections::HashSet<_>>();
+        (manager.accounts.clone(), uids)
+    };
+    let now = crate::crypto::now_ms();
+    let mut refreshed = 0usize;
+    let mut failed = 0usize;
+    for account in accounts {
+        if account.status == "disabled" || account.group == "desktop" {
+            continue;
+        }
+        if current_uids.contains(&account.uid) {
+            continue;
+        }
+        if account.refresh_token.is_empty() {
+            continue;
+        }
+        if account.token_expire_at.map(|t| t > now + 48 * 3600 * 1000).unwrap_or(false) {
+            continue;
+        }
+        if crate::account::try_refresh_account(&state.accounts, &account.id).await {
+            refreshed += 1;
+        } else {
+            failed += 1;
+        }
+    }
+    (refreshed, failed)
+}
+
 /// 自动签到调度（本地时区；启动时若已过执行时间会当天补签）
-async fn schedule_auto_checkin(state: Arc<AppState>) {
+pub async fn schedule_auto_checkin(state: Arc<AppState>) {
     use chrono::Timelike;
     let mut last_day = String::new();
     loop {
@@ -291,25 +349,50 @@ async fn schedule_auto_checkin(state: Arc<AppState>) {
             let now = chrono::Local::now();
             let today = now.format("%Y-%m-%d").to_string();
             if now.hour() as i64 >= hour && last_day != today {
-                let (failed, pending) = run_checkin_all(&state).await;
+                let (failed, pending, claimed, replayed, failed_count) = run_checkin_all(&state).await;
                 // 失败不盖章；没有活动时最多重试到配置时间后 2 小时再收工
                 let grace = (hour + 2).min(23);
                 if !failed && (pending == 0 || now.hour() as i64 >= grace) {
-                    last_day = today;
+                    last_day = today.clone();
                 }
+                let result = if failed {
+                    if claimed + replayed > 0 { "partial" } else { "failed" }
+                } else if claimed > 0 {
+                    "success"
+                } else if replayed > 0 {
+                    "already"
+                } else {
+                    "idle"
+                };
+                crate::store::save_json(
+                    "checkin-state.json",
+                    &serde_json::json!({
+                        "at": crate::crypto::now_ms(),
+                        "day": today,
+                        "result": result,
+                        "claimed": claimed,
+                        "replayed": replayed,
+                        "failed": failed_count,
+                        "pending": pending,
+                        "hour": hour,
+                    }),
+                );
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(10 * 60)).await;
     }
 }
 
-/// 返回 (是否有失败, 尚未出现活动/未确认的账号数)
-async fn run_checkin_all(state: &Arc<AppState>) -> (bool, usize) {
+/// 返回 (是否有失败, 尚未出现活动/未确认的账号数, 领取成功数, 已领数, 失败次数)
+async fn run_checkin_all(state: &Arc<AppState>) -> (bool, usize, usize, usize, usize) {
     use crate::info;
     use crate::store::append_jsonl;
     let accounts_snapshot = state.accounts.read().await.accounts.clone();
     let mut failed = false;
     let mut pending = 0usize;
+    let mut claimed_count = 0usize;
+    let mut replayed_count = 0usize;
+    let mut failed_count = 0usize;
     for mut account in accounts_snapshot {
         if account.status == "disabled" {
             continue;
@@ -367,6 +450,7 @@ async fn run_checkin_all(state: &Arc<AppState>) -> (bool, usize) {
                         }
                         Err(e) => {
                             failed = true;
+                            failed_count += 1;
                             append_jsonl(
                                 "checkin.jsonl",
                                 &serde_json::json!({ "accountId": account.id, "edition": account.edition, "result": "error", "auto": true, "error": e }),
@@ -374,6 +458,8 @@ async fn run_checkin_all(state: &Arc<AppState>) -> (bool, usize) {
                         }
                     }
                 }
+                if any_claimed { claimed_count += 1; }
+                if any_replayed { replayed_count += 1; }
                 if any_claimed || any_replayed {
                     let result = if any_claimed { "success" } else { "already" };
                     append_jsonl(
@@ -399,6 +485,7 @@ async fn run_checkin_all(state: &Arc<AppState>) -> (bool, usize) {
                     continue;
                 }
                 failed = true;
+                failed_count += 1;
                 append_jsonl(
                     "checkin.jsonl",
                     &serde_json::json!({ "accountId": account.id, "edition": account.edition, "result": "error", "auto": true, "error": e }),
@@ -406,7 +493,7 @@ async fn run_checkin_all(state: &Arc<AppState>) -> (bool, usize) {
             }
         }
     }
-    (failed, pending)
+    (failed, pending, claimed_count, replayed_count, failed_count)
 }
 
 fn show_main_window<R: tauri::Runtime, M: Manager<R>>(manager: &M) {
@@ -428,6 +515,7 @@ pub fn run() {
     CLOSE_TO_TRAY.store(close_to_tray, Ordering::SeqCst);
     let state_for_server = state.clone();
     let state_for_checkin = state.clone();
+    let state_for_keepalive = state.clone();
 
     tauri::Builder::default()
         .setup(move |app| {
@@ -439,6 +527,9 @@ pub fn run() {
             });
             tauri::async_runtime::spawn(async move {
                 schedule_auto_checkin(state_for_checkin).await;
+            });
+            tauri::async_runtime::spawn(async move {
+                schedule_token_keepalive(state_for_keepalive).await;
             });
 
             // 等待 Web 服务就绪（最多 10 秒），避免窗口白屏

@@ -1,7 +1,7 @@
 /** API 客户端：与后端 /api/* 对应 */
 
 import type {
-  Account, AppStatus, BackupResult, ChatItem, CheckinResult, CheckinState, ClientInfo, PlanInfo, ProxyConfig, QuotaInfo,
+  Account, AppStatus, AutoCheckinStatus, BackupResult, KeepaliveStatus, ChatItem, CheckinResult, CheckinState, ClientInfo, PlanInfo, ProxyConfig, QuotaInfo,
   Settings, UpdateDownloadStatus, UpdateInfo, UsageStats, Workspace,
 } from "@/lib/types";
 
@@ -66,6 +66,8 @@ export const api = {
   checkinStatus: () =>
     request<{ accounts: { id: string; state: CheckinState; error?: string }[] }>("/checkin/status"),
   getCheckinLogs: () => request<{ logs: Record<string, unknown>[] }>("/checkin/logs"),
+  getAutoCheckinStatus: () => request<AutoCheckinStatus>("/checkin/auto/status"),
+  getKeepaliveStatus: () => request<KeepaliveStatus>("/keepalive/status"),
 
   /* OAuth */
   openExternal: (url: string) =>

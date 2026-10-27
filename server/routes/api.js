@@ -233,8 +233,24 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
     }
   });
 
-  router.get("/checkin/status", async (_req, res) => {
-    const results = [];
+  router.get("/keepalive/status", (_req, res) => {
+    const settings = getSettings();
+    res.json({
+      enabled: settings.tokenKeepalive !== false,
+      last: loadJson("keepalive-state.json", null),
+    });
+  });
+
+  router.get("/checkin/auto/status", (_req, res) => {
+    const state = loadJson("checkin-state.json", {}) || {};
+    const settings = getSettings();
+    res.json({
+      autoCheckin: settings.autoCheckin,
+      last: state.at && state.result ? state : null,
+    });
+  });
+
+  router.get("/checkin/status", async (_req, res) => {    const results = [];
     for (const summary of accountManager.list()) {
       const account = accountManager.get(summary.id);
       if (
@@ -485,6 +501,7 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
     const incoming = req.body?.settings || {};
     if (incoming.theme) settings.theme = ["light", "dark", "system"].includes(incoming.theme) ? incoming.theme : settings.theme;
     if (typeof incoming.closeToTray === "boolean") settings.closeToTray = incoming.closeToTray;
+    if (typeof incoming.tokenKeepalive === "boolean") settings.tokenKeepalive = incoming.tokenKeepalive;
     if (incoming.clientDirOverrides) {
       settings.clientDirOverrides = {
         domestic: String(incoming.clientDirOverrides.domestic || ""),

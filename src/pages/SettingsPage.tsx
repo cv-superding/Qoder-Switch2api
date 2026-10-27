@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import { applyTheme, getSavedTheme, useTheme, type ThemeMode } from "@/lib/theme";
-import type { ClientInfo, Edition, Settings } from "@/lib/types";
+import type { AutoCheckinLast, AutoCheckinStatus, ClientInfo, Edition, KeepaliveStatus, Settings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useUpdateStore } from "@/stores/update";
 
@@ -30,6 +30,24 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatAutoLast(last: AutoCheckinLast): { time: string; text: string; tone: string } {
+  const date = new Date(last.at);
+  const time = `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (last.result === "success") {
+    return { time, text: `成功领取 ${last.claimed} 个账号${last.replayed ? `，${last.replayed} 个已签` : ""}`, tone: "text-emerald-600 dark:text-emerald-400" };
+  }
+  if (last.result === "partial") {
+    return { time, text: `部分成功：领取 ${last.claimed} 个，失败 ${last.failed} 次`, tone: "text-amber-600 dark:text-amber-400" };
+  }
+  if (last.result === "failed") {
+    return { time, text: `失败 ${last.failed} 次，稍后自动重试`, tone: "text-destructive" };
+  }
+  if (last.result === "already") {
+    return { time, text: "今日已签到", tone: "text-muted-foreground" };
+  }
+  return { time, text: "暂无活动或未到领取时间，稍后自动重试", tone: "text-muted-foreground" };
+}
+
 const ENDPOINT_FIELDS: { key: string; label: string; hint: string }[] = [
   { key: "openApiBaseUrl", label: "OpenAPI 地址", hint: "账号 / 额度 / 签到接口" },
   { key: "streamUrl", label: "流式对话地址", hint: "Cosy 签名 SSE 接口" },
@@ -40,6 +58,8 @@ const ENDPOINT_FIELDS: { key: string; label: string; hint: string }[] = [
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [autoStatus, setAutoStatus] = useState<AutoCheckinStatus | null>(null);
+  const [keepaliveStatus, setKeepaliveStatus] = useState<KeepaliveStatus | null>(null);
   const [initial, setInitial] = useState("");
   const [saving, setSaving] = useState(false);
   const [about, setAbout] = useState<{ name: string; version: string; description: string; references: string[] } | null>(null);
@@ -57,11 +77,18 @@ export default function SettingsPage() {
 
   useEffect(() => {
     setLoadError("");
-    Promise.all([api.api.getSettings(), api.api.getAbout().catch(() => null)])
-      .then(([s, a]) => {
+    Promise.all([
+      api.api.getSettings(),
+      api.api.getAbout().catch(() => null),
+      api.api.getAutoCheckinStatus().catch(() => null),
+      api.api.getKeepaliveStatus().catch(() => null),
+    ])
+      .then(([s, a, auto, keepalive]) => {
         setSettings(s.settings);
         setInitial(JSON.stringify(s.settings));
         if (a) setAbout(a);
+        if (auto) setAutoStatus(auto);
+        if (keepalive) setKeepaliveStatus(keepalive);
         if (!getSavedTheme()) applyTheme(s.settings.theme, { persist: false });
       })
       .catch((e) => {
@@ -88,6 +115,12 @@ export default function SettingsPage() {
       const res = await api.api.saveSettings({ ...settings, theme });
       setSettings(res.settings);
       setInitial(JSON.stringify(res.settings));
+      const [auto, keepalive] = await Promise.all([
+        api.api.getAutoCheckinStatus().catch(() => null),
+        api.api.getKeepaliveStatus().catch(() => null),
+      ]);
+      if (auto) setAutoStatus(auto);
+      if (keepalive) setKeepaliveStatus(keepalive);
       toast.success("设置已保存");
     } catch (e) {
       toast.error("保存失败", { description: api.asError(e) });
@@ -300,6 +333,21 @@ export default function SettingsPage() {
               <p className="mt-0.5 text-[10.5px] text-muted-foreground">
                 活动每天 10:00（UTC+8）刷新；程序在设定时间后自动检查，未成功会持续重试。
               </p>
+              {settings.autoCheckin.enabled ? (
+                autoStatus?.last ? (
+                  (() => {
+                    const info = formatAutoLast(autoStatus.last);
+                    return (
+                      <p className="mt-1 text-[10.5px] text-muted-foreground">
+                        上次自动签到：<span className="tabular-nums">{info.time}</span> ·{" "}
+                        <span className={info.tone}>{info.text}</span>
+                      </p>
+                    );
+                  })()
+                ) : (
+                  <p className="mt-1 text-[10.5px] text-muted-foreground">尚未运行；到设定时间后会自动执行。</p>
+                )
+              ) : null}
             </div>
             <div className="flex items-center gap-3">
               {settings.autoCheckin.enabled ? (
@@ -329,6 +377,27 @@ export default function SettingsPage() {
                 aria-label="每日自动签到"
               />
             </div>
+          </div>
+          <div className="mt-3 flex flex-col gap-4 rounded-xl border border-border/70 bg-muted/15 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-[12.5px] font-medium">Token 自动续期</div>
+              <p className="mt-0.5 text-[10.5px] text-muted-foreground">
+                每 6 小时检查反代账号，48 小时内过期的 Token 自动续期；客户端当前账号会跳过，避免登录态互相覆盖。
+              </p>
+              {keepaliveStatus?.last ? (
+                <p className="mt-1 text-[10.5px] text-muted-foreground">
+                  上次续期：{new Date(keepaliveStatus.last.at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                  {" · "}续期 {keepaliveStatus.last.refreshed} 个，失败 {keepaliveStatus.last.failed} 个
+                </p>
+              ) : (
+                <p className="mt-1 text-[10.5px] text-muted-foreground">尚未运行；启动 1 分钟后检查一次。</p>
+              )}
+            </div>
+            <Switch
+              checked={settings.tokenKeepalive !== false}
+              onCheckedChange={(v) => setSettings({ ...settings, tokenKeepalive: v })}
+              aria-label="Token 自动续期"
+            />
           </div>
         </SectionCard>
 

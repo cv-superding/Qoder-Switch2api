@@ -43,6 +43,8 @@ pub struct Settings {
     pub theme: String,
     #[serde(default = "default_close_to_tray")]
     pub close_to_tray: bool,
+    #[serde(default = "default_keepalive")]
+    pub token_keepalive: bool,
     #[serde(default)]
     pub client_dir_overrides: std::collections::HashMap<String, String>,
     #[serde(default)]
@@ -73,7 +75,11 @@ pub struct AutoCheckin {
 }
 
 fn default_hour() -> i64 {
-    9
+    10
+}
+
+fn default_keepalive() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -84,6 +90,7 @@ impl Default for Settings {
         Settings {
             theme: "light".into(),
             close_to_tray: true,
+            token_keepalive: true,
             client_dir_overrides: Default::default(),
             client_exe_paths: Default::default(),
             auto_checkin: AutoCheckin { enabled: false, hour: 10 },

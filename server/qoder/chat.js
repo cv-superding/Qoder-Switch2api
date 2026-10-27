@@ -404,10 +404,7 @@ async function* legacyStream(req) {
         for (const event of events) yield event;
       }
     }
-    if (!sawDone) {
-      yield { type: "error", error: "上游连接提前结束（未收到 [DONE]），响应可能不完整" };
-      return;
-    }
+    // 旧版 Qoder SSE 正常结束时可能没有 [DONE]，EOF 即完成
     yield { type: "done" };
   } catch (e) {
     yield { type: "error", error: String(e.message || e) };
@@ -615,10 +612,7 @@ async function* cloudStream(req) {
         dataLine = "";
       }
     }
-    if (!sawTerminal) {
-      yield { type: "error", error: "上游会话提前结束，响应可能不完整" };
-      return;
-    }
+    // Cloud SSE 可能直接 EOF 结束；按正常完成处理
     yield { type: "done" };
   } catch (e) {
     yield { type: "error", error: String(e.message || e) };
