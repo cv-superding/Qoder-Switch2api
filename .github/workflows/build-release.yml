@@ -52,6 +52,16 @@ jobs:
           Get-Item src-tauri/target/release/qoder-switch2api.exe, src-tauri/target/release/qoder-server.exe |
             Format-Table Name, Length
 
+      - name: Build NSIS installer
+        shell: pwsh
+        run: npm run desktop:installer
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          Get-Item src-tauri/target/release/bundle/nsis/*.exe |
+            Format-Table Name, Length
+
       - name: Create release and upload binaries
         uses: softprops/action-gh-release@v2
         with:
@@ -61,34 +71,21 @@ jobs:
           body: |
             ## Qoder-Switch2api ${{ env.RELEASE_TAG }}
 
-            界面重做与一批稳定性修复。国内版 Qoder CN / 国际版 Qoder 双版本账号池、OpenAI / Anthropic 兼容反代保持不变。
+            国内版 Qoder CN / 国际版 Qoder 双版本账号池、每日自动签到、额度统计与 OpenAI / Anthropic 兼容反代。
 
             ### 下载
 
-            - `qoder-switch2api.exe`：Windows 桌面版，内置本地服务与 WebUI
+            - `Qoder-Switch2api_<version>_x64-setup.exe`：**推荐安装版**，按用户安装、无需管理员权限，自动创建开始菜单快捷方式并带卸载程序
+            - `qoder-switch2api.exe`：便携桌面版，不写入安装目录
             - `qoder-server.exe`：仅启动本地服务，浏览器访问 `http://127.0.0.1:8787`
 
+            安装版与便携版共用 `~/.qoder-switch/` 数据目录，卸载不会删除账号和配置。
             可执行文件未签名，首次运行如遇 SmartScreen 提示请选择「更多信息 → 仍要运行」。
 
-            ### 主要更新
+            完整更新日志见仓库 README 的「更新日志」。
 
-            - 全新界面：深色侧栏、浅色工作区、完整暗色模式、移动端抽屉导航
-            - 桌面窗口默认尺寸调整为 1100×740，README 增加界面预览截图
-            - 支持新版 Qoder 数据目录 `com.qoder.app.stable`，修复误报“未安装”和导入本机账号失败；导入时自动匹配已安装版本
-            - 支持自定义安装目录：从运行中的 Qoder 进程识别真实可执行文件，修复无法结束/重启客户端；OAuth 复用客户端 machine_id 与 machine_token
-            - 界面明确显示已检测的客户端版本；反代页无账号时引导切换到另一已配置版本，并禁用无意义的“获取上游模型”
-            - 额度进度条按剩余比例着色；桌面版新增系统托盘与“关闭窗口时最小化到托盘”设置
-            - 账号卡片、积分 / Token 统计、反代配置、会话与设置页面重做
-            - 修复备份导入导出不含登录态、默认备份无法导入的问题
-            - 修复 OAuth 无法调用系统浏览器、Token 过期状态不显示、套餐信息不显示
-            - **结束 Qoder 进程改为按可执行文件绝对路径精确匹配**，不再全局按进程名结束，避免误关其它 Qoder 窗口
-            - 无客户端登录 Token 的账号（PAT / 备份占位）拒绝切换；切换不再写入空 Token 或沿用上一个账号的身份与 refresh token
-            - 修复手动 Token 账号因机器信息缺失导致请求失败、反代未使用端点覆盖、上游 401 被吞成 503、SSE 错误被当成成功
-            - Rust 侧补齐上游请求超时、`/v1/responses` 与 `/v1/messages` 流式输出、用量排序与 Token 统计
-            - 修复会话导出路径穿越、设置小时越界、JSON 跨进程写入冲突、签到状态与自动签到时区等问题
-            - 统一 Node / Rust 账号库字段格式，并兼容旧数据迁移
-
-            > 账号凭证等同密码。桌面版数据保存在 `~/.qoder-switch/`，本项目不会上传任何账号数据。
+            > 账号凭证等同密码。数据保存在 `~/.qoder-switch/`，本项目不会上传任何账号数据。
           files: |
+            src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/qoder-switch2api.exe
             src-tauri/target/release/qoder-server.exe

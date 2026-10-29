@@ -67,8 +67,11 @@ npm run build      # 生产构建
 npm start          # 单端口托管前端 + API + 反代 → http://127.0.0.1:8787
 ```
 
-也可以直接从 [Releases](https://github.com/cv-superding/Qoder-Switch2api/releases) 下载 Windows
-可执行文件：`qoder-switch2api.exe`（桌面窗口）或 `qoder-server.exe`（仅本地服务）。
+也可以直接从 [Releases](https://github.com/cv-superding/Qoder-Switch2api/releases) 下载：
+
+- **安装版（推荐）**：`Qoder-Switch2api_<版本>_x64-setup.exe`，按用户安装、无需管理员权限，带开始菜单快捷方式与卸载程序；卸载不会删除 `~/.qoder-switch/` 数据
+- **便携桌面版**：`qoder-switch2api.exe`
+- **仅本地服务**：`qoder-server.exe`，浏览器访问 `http://127.0.0.1:8787`
 
 ### 方式二：Tauri 桌面模式（Rust 后端，同参考项目 WorkBuddy-Switch2api 形态）
 
@@ -171,6 +174,13 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 - 国际版 legacy 流式端点（api3.qoder.sh）按 qoder2api 移植，未持国际版账号实测。
 
 ## 更新日志
+
+### v1.1.21
+
+- Windows 安装包：新增 NSIS 安装程序（按用户安装，无需管理员权限），自动创建开始菜单/桌面快捷方式，并带卸载程序
+- 安装版与便携版并存：Release 同时提供 `setup.exe` 安装包、`qoder-switch2api.exe` 便携桌面版和 `qoder-server.exe` 独立服务
+- 安装包内置 WebView2 引导安装，Win10/11 首次安装会自动补齐运行环境
+- 安装/卸载不会删除 `~/.qoder-switch/` 中的账号与配置，卸载后重新安装可继续使用
 
 ### v1.1.20
 

@@ -1,7 +1,7 @@
 {
   "name": "qoder-switch2api",
   "private": true,
-  "version": "1.1.20",
+  "version": "1.1.21",
   "author": "qoder-switch2api",
   "license": "MIT",
   "type": "module",
@@ -17,6 +17,7 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
+    "desktop:installer": "tauri build --bundles nsis",
     "icon": "node scripts/gen-icon.mjs public/icon-src.png && tauri icon public/icon-src.png --output src-tauri/icons"
   },
   "dependencies": {
@@ -45,6 +46,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/cli": "^2.12.4",
     "@types/node": "^22.10.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
