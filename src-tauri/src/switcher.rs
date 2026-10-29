@@ -297,15 +297,15 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
 
 /// 官方客户端的认证环境描述，新建 auth.v1.dat 时必须带上
 fn default_auth_context(edition: &Edition) -> String {
-    let (site, openapi) = if edition.value == "international" {
-        ("https://qoder.com", "https://openapi.qoder.sh")
+    let (site, client_id) = if edition.value == "international" {
+        ("https://qoder.com", "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa")
     } else {
-        ("https://qoder.com.cn", "https://openapi.qoder.com.cn")
+        ("https://qoder.com.cn", edition.oauth.client_id.as_str())
     };
     serde_json::to_string(&serde_json::json!([
         site,
-        openapi,
-        "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa",
+        edition.oauth.open_api_base_url,
+        client_id,
         "prod"
     ]))
     .unwrap_or_else(|_| "[]".into())
@@ -484,6 +484,119 @@ Get-Process -ErrorAction SilentlyContinue |
     None
 }
 
+/// 从 Windows 卸载注册表定位自定义安装目录（例如 F:\AdobeAll\Qoder CN）
+#[cfg(windows)]
+fn registry_client_exe(edition: &Edition) -> Option<String> {
+    let script = r#"
+$keys = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')
+$items = Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like '*Qoder*' } | ForEach-Object { [pscustomobject]@{ Name = $_.DisplayName; Icon = $_.DisplayIcon; Uninstall = $_.UninstallString } }
+$items | ConvertTo-Json -Compress
+"#;
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(0x08000000)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(text.trim()).ok()?;
+    let items = match parsed {
+        Value::Array(list) => list,
+        Value::Object(_) => vec![parsed],
+        _ => return None,
+    };
+    let target = if edition.value == "domestic" { "Qoder CN.exe" } else { "Qoder.exe" };
+    for item in items {
+        let name = item.get("Name").and_then(|v| v.as_str()).unwrap_or("");
+        let lower = name.to_lowercase();
+        let is_cn = lower.contains("qoder cn") || lower.contains("qodercn");
+        if (edition.value == "domestic") != is_cn {
+            continue;
+        }
+        for key in ["Icon", "Uninstall"] {
+            let raw = item.get(key).and_then(|v| v.as_str()).unwrap_or("").trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let mut paths: Vec<String> = Vec::new();
+            for part in raw.split('"') {
+                if part.to_lowercase().ends_with(".exe") || part.to_lowercase().ends_with(".ico") {
+                    paths.push(part.to_string());
+                }
+            }
+            if let Some(first) = raw.split_whitespace().next() {
+                paths.push(first.trim_matches('"').to_string());
+            }
+            if let Some(icon) = raw.split(',').next() {
+                paths.push(icon.trim_matches('"').to_string());
+            }
+            for file in paths {
+                if !(file.to_lowercase().ends_with(".exe") || file.to_lowercase().ends_with(".ico")) {
+                    continue;
+                }
+                if Path::new(&file).file_name().and_then(|v| v.to_str()).map(|v| v.eq_ignore_ascii_case(target)).unwrap_or(false)
+                    && Path::new(&file).exists()
+                {
+                    return Some(file);
+                }
+                let Some(root) = Path::new(&file).parent() else { continue };
+                let direct = root.join(target);
+                if direct.exists() {
+                    return Some(direct.to_string_lossy().to_string());
+                }
+                let versions = root.join(".qoder-versions");
+                if let Ok(entries) = fs::read_dir(&versions) {
+                    let mut dirs: Vec<PathBuf> = entries
+                        .filter_map(|e| e.ok().map(|e| e.path()).filter(|p| p.is_dir()))
+                        .collect();
+                    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                    for dir in dirs {
+                        let candidate = dir.join(target);
+                        if candidate.exists() {
+                            return Some(candidate.to_string_lossy().to_string());
+                        }
+                    }
+                }
+                let launcher = root.join("resources").join("launcher").join(
+                    if edition.value == "domestic" { "Qoder CN Launcher.exe" } else { "Qoder Launcher.exe" },
+                );
+                if launcher.exists() {
+                    return Some(launcher.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 启动器不是主进程；读 state.ini / install.ini 找到实际运行的版本化 exe
+fn resolve_launcher_executable(exe_path: &str) -> String {
+    if !exe_path.to_lowercase().ends_with("launcher.exe") {
+        return exe_path.to_string();
+    }
+    let Some(dir) = Path::new(exe_path).parent() else { return exe_path.to_string() };
+    for name in ["state.ini", "install.ini"] {
+        let Ok(raw) = fs::read_to_string(dir.join(name)) else { continue };
+        let mut install_dir = String::new();
+        let mut app_exe = String::new();
+        for line in raw.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                match key.trim() {
+                    "installDir" => install_dir = value.trim().to_string(),
+                    "appExecutable" => app_exe = value.trim().to_string(),
+                    _ => {}
+                }
+            }
+        }
+        if !install_dir.is_empty() && !app_exe.is_empty() {
+            let actual = Path::new(&install_dir).join(app_exe);
+            if actual.exists() {
+                return actual.to_string_lossy().to_string();
+            }
+        }
+    }
+    exe_path.to_string()
+}
+
 pub fn find_client_exe(edition: &Edition) -> Option<String> {
     let cache = EXE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some((at, value)) = cache
@@ -541,12 +654,27 @@ pub fn find_client_exe(edition: &Edition) -> Option<String> {
                             .join("Qoder Launcher.exe"),
                     );
                 }
+                candidates.push(
+                    PathBuf::from(&local_app_data)
+                        .join("Qoder CN")
+                        .join("Qoder CN Launcher")
+                        .join("Qoder CN Launcher.exe"),
+                );
             }
             found = candidates
                 .into_iter()
                 .find(|path| path.exists())
                 .map(|path| path.to_string_lossy().to_string());
         }
+    }
+    if found.is_none() {
+        #[cfg(windows)]
+        {
+            found = registry_client_exe(edition);
+        }
+    }
+    if let Some(path) = found.clone() {
+        found = Some(resolve_launcher_executable(&path));
     }
     if let Ok(mut map) = cache.lock() {
         map.insert(edition.value.clone(), (Instant::now(), found.clone()));

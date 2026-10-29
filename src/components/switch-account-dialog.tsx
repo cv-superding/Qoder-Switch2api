@@ -13,6 +13,17 @@ interface Step {
   detail?: string;
 }
 
+/** 后端会把同一步骤的 running / done 都推过来，按名称合并只保留最新状态 */
+function dedupeSteps(list: Step[]): Step[] {
+  const order: string[] = [];
+  const map = new Map<string, Step>();
+  for (const step of list) {
+    if (!map.has(step.name)) order.push(step.name);
+    map.set(step.name, step);
+  }
+  return order.map((name) => map.get(name)!);
+}
+
 /** 客户端切换对话框：备份 → 结束进程 → 写入账号 → 重启 */
 export function SwitchAccountDialog({
   open, onOpenChange, account, onDone,
@@ -53,7 +64,7 @@ export function SwitchAccountDialog({
           try {
             const job = await api.api.switchJob(res.jobId);
             if (cancelled) return;
-            setSteps(job.steps);
+            setSteps(dedupeSteps(job.steps));
             if (job.done) {
               if (poller) window.clearInterval(poller);
               poller = null;
@@ -85,6 +96,7 @@ export function SwitchAccountDialog({
 
   const running = steps.some((s) => s.status === "running");
   const completed = steps.filter((s) => s.status === "done").length;
+  const restartFailed = steps.some((s) => s.name === "重启 Qoder" && s.status === "error");
   const progress = steps.length > 0 ? Math.round((completed / steps.length) * 100) : 0;
 
   return (
@@ -111,7 +123,7 @@ export function SwitchAccountDialog({
         <div className="space-y-2">
           <div className="flex items-center justify-between text-[10.5px] text-muted-foreground">
             <span>{done ? "切换完成" : error ? "切换失败" : "正在切换"}</span>
-            <span className="tabular-nums">{done ? "4 / 4" : `${completed} / ${Math.max(steps.length, 4)}`}</span>
+            <span className="tabular-nums">{completed} / {Math.max(steps.length, 4)}</span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
             <div
@@ -119,7 +131,7 @@ export function SwitchAccountDialog({
                 "h-full rounded-full transition-[width] duration-500",
                 error ? "bg-destructive" : done ? "bg-primary" : "bg-primary/70",
               )}
-              style={{ width: `${done ? 100 : Math.max(progress, steps.length > 0 ? 8 : 4)}%` }}
+              style={{ width: `${done && !restartFailed ? 100 : Math.max(progress, steps.length > 0 ? 8 : 4)}%` }}
             />
           </div>
         </div>
@@ -162,10 +174,17 @@ export function SwitchAccountDialog({
         ) : null}
 
         {done ? (
-          <div className="flex items-start gap-2 rounded-xl border border-primary/25 bg-primary/[0.05] px-3.5 py-2.5 text-[11.5px] text-primary">
-            <Check className="mt-0.5 size-3.5 shrink-0" />
-            <span>登录态已写入，客户端正在以新账号启动。</span>
-          </div>
+          restartFailed ? (
+            <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-[11.5px] text-amber-700 dark:text-amber-400">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span>登录态已写入，但客户端未能自动启动，请手动打开 Qoder。</span>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2 rounded-xl border border-primary/25 bg-primary/[0.05] px-3.5 py-2.5 text-[11.5px] text-primary">
+              <Check className="mt-0.5 size-3.5 shrink-0" />
+              <span>登录态已写入，客户端正在以新账号启动。</span>
+            </div>
+          )
         ) : null}
 
         <div className="flex items-center justify-between gap-3">

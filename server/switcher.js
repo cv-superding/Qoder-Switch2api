@@ -113,6 +113,62 @@ Get-Process -ErrorAction SilentlyContinue |
   }
 }
 
+/** 从 Windows 卸载注册表定位自定义安装目录（如 F:\AdobeAll\Qoder CN） */
+async function findRegistryClientExe(edition) {
+  try {
+    const script = [
+      "$keys = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')",
+      "$items = Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like '*Qoder*' } | ForEach-Object { [pscustomobject]@{ Name = $_.DisplayName; Icon = $_.DisplayIcon; Uninstall = $_.UninstallString } }",
+      "$items | ConvertTo-Json -Compress",
+    ].join("\n");
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 15000,
+    });
+    const parsed = JSON.parse(stdout.trim() || "[]");
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    const targetExe = edition.value === "domestic" ? "Qoder CN.exe" : "Qoder.exe";
+    for (const item of items) {
+      const name = String(item.Name || "");
+      const isCN = /Qoder\s*CN|QoderCN/i.test(name);
+      if (edition.value === "domestic" ? !isCN : isCN) continue;
+      const rawPaths = [item.Icon, item.Uninstall]
+        .map((raw) => String(raw || "").trim())
+        .filter(Boolean)
+        .flatMap((raw) => {
+          const quoted = [...raw.matchAll(/"([^"]+\.exe)"/gi)].map((m) => m[1]);
+          const first = raw.split(/\s+/)[0].replace(/^"|"$/g, "");
+          const icon = raw.split(",")[0].replace(/^"|"$/g, "");
+          return [...quoted, first, icon];
+        })
+        .filter((p) => /\.(exe|ico)$/i.test(p));
+      for (const file of rawPaths) {
+        if (path.basename(file).toLowerCase() === targetExe.toLowerCase() && fs.existsSync(file)) return file;
+        const root = path.dirname(file);
+        const candidates = [path.join(root, targetExe)];
+        const versionsDir = path.join(root, ".qoder-versions");
+        try {
+          const versions = fs.readdirSync(versionsDir, { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name)
+            .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+          for (const version of versions) candidates.push(path.join(versionsDir, version, targetExe));
+        } catch {
+          /* no versioned dir */
+        }
+        candidates.push(path.join(root, "resources", "launcher", edition.value === "domestic" ? "Qoder CN Launcher.exe" : "Qoder Launcher.exe"));
+        for (const candidate of candidates) {
+          if (fs.existsSync(candidate)) return candidate;
+        }
+      }
+    }
+  } catch {
+    /* 注册表不可用时退回常规探测 */
+  }
+  return null;
+}
+
 export async function findClientExe(edition) {
   const cached = exeCache.get(edition.value);
   if (cached && Date.now() - cached.at < (cached.path ? EXE_CACHE_MS : 15_000)) return cached.path;
@@ -133,8 +189,11 @@ export async function findClientExe(edition) {
       }
     }
     if (localAppData) {
-      for (const name of launcherNames) {
-        candidates.push(path.join(localAppData, name, "Qoder Launcher", "Qoder Launcher.exe"));
+      const launcherDirs = edition.value === "domestic"
+        ? [["Qoder CN", "Qoder CN Launcher", "Qoder CN Launcher.exe"], ["Qoder CN", "Qoder Launcher", "Qoder Launcher.exe"]]
+        : [["Qoder", "Qoder Launcher", "Qoder Launcher.exe"]];
+      for (const parts of launcherDirs) {
+        candidates.push(path.join(localAppData, ...parts));
       }
     }
     for (const candidate of candidates) {
@@ -148,8 +207,35 @@ export async function findClientExe(edition) {
       }
     }
   }
+  if (!found && process.platform === "win32") {
+    found = await findRegistryClientExe(edition);
+  }
+  found = resolveLauncherExecutable(found);
   exeCache.set(edition.value, { at: Date.now(), path: found });
   return found;
+}
+
+/** Qoder 启动器不是主进程；按 state.ini 找到实际运行的版本化 exe，保证按路径精确结束进程 */
+function resolveLauncherExecutable(exePath) {
+  if (!exePath || !/Launcher\.exe$/i.test(exePath)) return exePath;
+  const dir = path.dirname(exePath);
+  for (const name of ["state.ini", "install.ini"]) {
+    try {
+      const raw = fs.readFileSync(path.join(dir, name), "utf8");
+      const values = {};
+      for (const line of raw.split(/\r?\n/)) {
+        const idx = line.indexOf("=");
+        if (idx > 0) values[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+      }
+      if (values.installDir && values.appExecutable) {
+        const actual = path.resolve(values.installDir, values.appExecutable);
+        if (fs.existsSync(actual)) return actual;
+      }
+    } catch {
+      /* try next ini */
+    }
+  }
+  return exePath;
 }
 
 /* ------------------------------------------------------------------ */
@@ -330,11 +416,15 @@ async function backupClientAuth(dir, authDat, vscdb) {
 
 /** 官方客户端的认证环境描述，新建 auth.v1.dat 时必须带上 */
 function defaultAuthenticationContext(edition) {
-  const desktopClientId = "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa";
-  if (edition.value === "international") {
-    return JSON.stringify(["https://qoder.com", "https://openapi.qoder.sh", desktopClientId, "prod"]);
-  }
-  return JSON.stringify(["https://qoder.com.cn", "https://openapi.qoder.com.cn", desktopClientId, "prod"]);
+  const desktopClientId = edition.value === "international"
+    ? "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"
+    : edition.oauth.clientId;
+  return JSON.stringify([
+    edition.value === "international" ? "https://qoder.com" : "https://qoder.com.cn",
+    edition.oauth.openApiBaseUrl,
+    desktopClientId,
+    "prod",
+  ]);
 }
 
 async function writeAuthDat(dir, authDat, account, edition) {
