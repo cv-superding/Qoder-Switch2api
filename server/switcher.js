@@ -249,8 +249,17 @@ export async function switchClientAccount(accountId, { restart = true, onStep } 
   const dir = resolveClientDir(edition, settings.clientDirOverrides?.[account.edition]);
   const authDat = authDatPath(dir);
   const vscdb = globalStorageDb(dir);
-  if (!fs.existsSync(authDat) && !fs.existsSync(vscdb)) {
-    throw new Error("未找到客户端登录态文件，请先打开 Qoder 并登录一次，再执行切换");
+  const hasAuth = fs.existsSync(authDat) || fs.existsSync(vscdb);
+  if (!hasAuth) {
+    // 客户端已安装但从没登录过：沿用客户端的 OSCrypt 密钥新建 auth.v1.dat，
+    // 不必要求用户先手动登录一次。
+    if (!fs.existsSync(dir)) {
+      throw new Error("未检测到客户端数据目录，请先安装并打开一次 Qoder 客户端");
+    }
+    const key = await loadOscryptKey(dir).catch(() => null);
+    if (!key) {
+      throw new Error("客户端尚未生成加密密钥，请先打开一次 Qoder 客户端再切换");
+    }
   }
 
   const step = (name, status, detail) => onStep?.({ name, status, detail });
@@ -280,8 +289,8 @@ export async function switchClientAccount(accountId, { restart = true, onStep } 
     await writeVscdbAuth(vscdb, account);
     step("写入目标账号", "done", "state.vscdb 已更新");
   } else {
-    step("写入目标账号", "error", "未找到登录态文件（auth.v1.dat / state.vscdb）");
-    throw new Error("未找到客户端登录态文件，请先在本机打开 Qoder 并登录一次");
+    await writeAuthDat(dir, authDat, account, edition);
+    step("写入目标账号", "done", "已创建 auth.v1.dat");
   }
 
   accountManager.update(accountId, { lastSwitchAt: Date.now() });
@@ -319,7 +328,16 @@ async function backupClientAuth(dir, authDat, vscdb) {
   return null;
 }
 
-async function writeAuthDat(dir, authDat, account) {
+/** 官方客户端的认证环境描述，新建 auth.v1.dat 时必须带上 */
+function defaultAuthenticationContext(edition) {
+  const desktopClientId = "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa";
+  if (edition.value === "international") {
+    return JSON.stringify(["https://qoder.com", "https://openapi.qoder.sh", desktopClientId, "prod"]);
+  }
+  return JSON.stringify(["https://qoder.com.cn", "https://openapi.qoder.com.cn", desktopClientId, "prod"]);
+}
+
+async function writeAuthDat(dir, authDat, account, edition) {
   const key = await loadOscryptKey(dir);
   if (!key) throw new Error("无法解出 OSCrypt 密钥，写入取消（避免损坏客户端登录态）");
   // 读取原文件结构，保留未知字段与 expiresAt 的格式
@@ -330,10 +348,12 @@ async function writeAuthDat(dir, authDat, account) {
     original = null;
   }
   const base = original && typeof original === "object" ? original : { schemaVersion: 1 };
-  const useIso = typeof base.expiresAt === "string";
+  const useIso = original ? typeof base.expiresAt === "string" : true;
   const auth = {
     ...base,
     schemaVersion: base.schemaVersion ?? 1,
+    authenticationContext:
+      base.authenticationContext ?? defaultAuthenticationContext(edition),
     token: account.securityOauthToken,
     // 切换账号时必须写入目标账号自己的值，不能沿用上一个账号的凭证/身份
     refreshToken: account.refreshToken || "",
@@ -347,6 +367,7 @@ async function writeAuthDat(dir, authDat, account) {
       name: account.name || "",
       email: account.email || "",
       phone: account.phone || "",
+      avatarUrl: account.avatarUrl || base.user?.avatarUrl || null,
     },
   };
   const encrypted = oscryptEncrypt(key, JSON.stringify(auth));

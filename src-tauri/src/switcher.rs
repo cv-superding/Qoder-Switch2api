@@ -192,6 +192,8 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
         let mut base = original.unwrap_or_else(|| json!({ "schemaVersion": 1 }));
         if let Some(obj) = base.as_object_mut() {
             obj.insert("schemaVersion".into(), obj.get("schemaVersion").cloned().unwrap_or(json!(1)));
+            obj.entry("authenticationContext")
+                .or_insert_with(|| json!(default_auth_context(edition)));
             obj.insert("token".into(), json!(account.security_oauth_token));
             // 切换账号必须写入目标账号自己的凭证与身份，不能沿用上一个账号的值
             obj.insert("refreshToken".into(), json!(account.refresh_token));
@@ -217,6 +219,10 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
                 u.insert("name".into(), json!(account.name));
                 u.insert("email".into(), json!(account.email));
                 u.insert("phone".into(), json!(account.phone));
+                u.insert(
+                    "avatarUrl".into(),
+                    if account.avatar_url.is_empty() { Value::Null } else { json!(account.avatar_url) },
+                );
             }
             obj.insert("user".into(), user);
         }
@@ -263,7 +269,46 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
         return Ok(());
     }
 
-    Err("未找到客户端登录态文件（auth.v1.dat / state.vscdb），请先在本机打开 Qoder 并登录一次".into())
+    // 从没登录过的客户端：直接用 OSCrypt 密钥生成一份完整登录态
+    let key = load_oscrypt_key(&dir)
+        .ok_or_else(|| "无法解出 OSCrypt 密钥，写入取消（避免损坏客户端登录态）".to_string())?;
+    let user = json!({
+        "id": account.uid,
+        "name": account.name,
+        "email": account.email,
+        "phone": account.phone,
+        "avatarUrl": if account.avatar_url.is_empty() { Value::Null } else { json!(account.avatar_url) },
+    });
+    let auth = json!({
+        "schemaVersion": 1,
+        "authenticationContext": default_auth_context(edition),
+        "token": account.security_oauth_token,
+        "refreshToken": account.refresh_token,
+        "expiresAt": account.token_expire_at.map(iso_from_ms).map(Value::String).unwrap_or(Value::Null),
+        "refreshTokenExpiresAt": account.refresh_token_expires_at.map(iso_from_ms).map(Value::String).unwrap_or(Value::Null),
+        "user": user,
+    });
+    let encrypted = oscrypt_encrypt(&key, &auth.to_string());
+    let tmp = auth_dat.with_extension("tmp");
+    fs::write(&tmp, &encrypted).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &auth_dat).map_err(|e| e.to_string())?;
+    return Ok(());
+}
+
+/// 官方客户端的认证环境描述，新建 auth.v1.dat 时必须带上
+fn default_auth_context(edition: &Edition) -> String {
+    let (site, openapi) = if edition.value == "international" {
+        ("https://qoder.com", "https://openapi.qoder.sh")
+    } else {
+        ("https://qoder.com.cn", "https://openapi.qoder.com.cn")
+    };
+    serde_json::to_string(&serde_json::json!([
+        site,
+        openapi,
+        "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa",
+        "prod"
+    ]))
+    .unwrap_or_else(|_| "[]".into())
 }
 
 fn merge_client_auth_json(base: Value, account: &Account) -> Value {
@@ -535,7 +580,13 @@ where
     let auth_dat = auth_dat_path(&dir);
     let vscdb = global_storage_db(&dir);
     if !auth_dat.exists() && !vscdb.exists() {
-        return Err("未找到客户端登录态文件，请先打开 Qoder 并登录一次，再执行切换".into());
+        // 客户端装过但从未登录：只要有数据目录和 OSCrypt 密钥，就直接新建 auth.v1.dat
+        if !dir.exists() {
+            return Err("未检测到客户端数据目录，请先安装并打开一次 Qoder 客户端".into());
+        }
+        if load_oscrypt_key(&dir).is_none() {
+            return Err("客户端尚未生成加密密钥，请先打开一次 Qoder 客户端再切换".into());
+        }
     }
     let exe = resolve_client_exe(edition, override_dir, exe_override);
 
