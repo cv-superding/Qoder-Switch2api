@@ -430,8 +430,8 @@ pub async fn start_download() -> Result<Value, String> {
     Ok(get_download_status())
 }
 
-fn batch_escape(path: &str) -> String {
-    path.replace('%', "%%")
+fn ps_escape(path: &str) -> String {
+    path.replace('\'', "''")
 }
 
 /// 生成并启动一个等待当前进程退出的更新脚本，然后退出当前程序。
@@ -451,32 +451,25 @@ pub fn install_downloaded_update() -> Result<Value, String> {
     {
         let current = std::env::current_exe().map_err(|e| format!("获取当前程序路径失败: {}", e))?;
         let pid = std::process::id();
-        let script = std::env::temp_dir().join(format!("qoder-switch-update-{}.cmd", pid));
-        let src = batch_escape(&source.to_string_lossy());
-        let cur = batch_escape(&current.to_string_lossy());
+        // 单个隐藏的 PowerShell 完成等待/替换/重启，避免旧 .cmd 循环
+        // 反复拉起 tasklist/powershell 导致黑窗闪烁
+        let script = std::env::temp_dir().join(format!("qoder-switch-update-{}.ps1", pid));
+        let src = ps_escape(&source.to_string_lossy());
+        let cur = ps_escape(&current.to_string_lossy());
         let content = format!(
-            r#"@echo off
-setlocal
-:wait
-tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
-if not errorlevel 1 (
-  powershell -NoProfile -Command "Start-Sleep -Milliseconds 500" >nul 2>&1
-  goto wait
-)
-powershell -NoProfile -Command "Unblock-File -LiteralPath '{src}'" >nul 2>&1
-move /Y "{src}" "{cur}" >nul 2>&1
-if errorlevel 1 (
-  start "" "{src}"
-) else (
-  start "" "{cur}"
-)
-del "%~f0"
+            r#"$ErrorActionPreference = 'SilentlyContinue'
+while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}
+Unblock-File -LiteralPath '{src}'
+$moved = $false
+try {{ Move-Item -LiteralPath '{src}' -Destination '{cur}' -Force -ErrorAction Stop; $moved = $true }} catch {{}}
+if ($moved) {{ Start-Process -FilePath '{cur}' }} else {{ Start-Process -FilePath '{src}' }}
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
 "#
         );
         std::fs::write(&script, content).map_err(|e| format!("写入更新脚本失败: {}", e))?;
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .arg("/C")
+        std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script)
             .creation_flags(0x08000000)
             .spawn()

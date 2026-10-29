@@ -175,6 +175,13 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 更新日志
 
+### v1.1.25
+
+- 应用内更新不再闪黑窗：旧的 `.cmd` 每 500ms 拉起 `tasklist`/`powershell` 的循环，改为单个隐藏 PowerShell 完成等待、替换和重启
+- 更新脚本不会再留下多个临时 cmd 窗口或脚本进程
+- 复核 Node / Rust 国内版 `auth.v1.dat`：认证上下文、schema、Token、到期时间均与 Qoder CN 真实登录态逐字一致
+- 复核 Qoder CN 自定义目录与启动器解析：可正确定位 `F:\AdobeAll\Qoder CN\.qoder-versions\...\Qoder CN.exe`
+
 ### v1.1.24
 
 - 修正国内版新建 `auth.v1.dat` 的 `authenticationContext`：实测值应为 `https://qoder.cn + openapi.qoder.com.cn + 732aef47… + prod`
