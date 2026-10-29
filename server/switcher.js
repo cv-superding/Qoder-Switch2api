@@ -416,11 +416,12 @@ async function backupClientAuth(dir, authDat, vscdb) {
 
 /** 官方客户端的认证环境描述，新建 auth.v1.dat 时必须带上 */
 function defaultAuthenticationContext(edition) {
-  const desktopClientId = edition.value === "international"
-    ? "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"
-    : edition.oauth.clientId;
+  // Qoder 桌面端登录后写入的真实上下文（2026-10 实测）：
+  //   国际版 ["https://qoder.com","https://openapi.qoder.sh","732aef47-...","prod"]
+  //   国内版 ["https://qoder.cn","https://openapi.qoder.com.cn","732aef47-...","prod"]
+  const desktopClientId = "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa";
   return JSON.stringify([
-    edition.value === "international" ? "https://qoder.com" : "https://qoder.com.cn",
+    edition.value === "international" ? "https://qoder.com" : "https://qoder.cn",
     edition.oauth.openApiBaseUrl,
     desktopClientId,
     "prod",

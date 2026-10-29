@@ -175,6 +175,13 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 更新日志
 
+### v1.1.24
+
+- 修正国内版新建 `auth.v1.dat` 的 `authenticationContext`：实测值应为 `https://qoder.cn + openapi.qoder.com.cn + 732aef47… + prod`
+- OAuth 登录后的国内版账号现在可直接切换，不再需要先在 Qoder CN 手动登录一次
+- 保留 v1.1.23 的进度去重、自定义安装目录识别与启动器解析修复
+- Node / Rust 生成结果均与 Qoder CN 客户端真实登录态逐字比对通过
+
 ### v1.1.23
 
 - 修复切换进度重复显示：同一步骤的 running/done 现在按名称合并，只保留最新状态

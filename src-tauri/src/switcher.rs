@@ -297,15 +297,16 @@ pub fn write_client_auth(edition: &Edition, account: &Account, override_dir: &st
 
 /// 官方客户端的认证环境描述，新建 auth.v1.dat 时必须带上
 fn default_auth_context(edition: &Edition) -> String {
-    let (site, client_id) = if edition.value == "international" {
-        ("https://qoder.com", "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa")
+    // Qoder 桌面端登录后写入的真实上下文（2026-10 实测）
+    let site = if edition.value == "international" {
+        "https://qoder.com"
     } else {
-        ("https://qoder.com.cn", edition.oauth.client_id.as_str())
+        "https://qoder.cn"
     };
     serde_json::to_string(&serde_json::json!([
         site,
         edition.oauth.open_api_base_url,
-        client_id,
+        "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa",
         "prod"
     ]))
     .unwrap_or_else(|_| "[]".into())
