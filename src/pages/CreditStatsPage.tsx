@@ -75,7 +75,13 @@ export default function CreditStatsPage() {
   async function onRefresh() {
     await refreshCredits(editionAccounts.map((a) => a.id));
     void loadLogs();
-    toast.success("积分与签到记录已刷新");
+    const errors = useAccountsStore.getState().creditErrorMap;
+    const failed = editionAccounts.filter((a) => errors[a.id]).length;
+    if (failed > 0) {
+      toast.warning("部分账号额度查询失败", { description: `${failed} / ${editionAccounts.length} 个账号未刷新成功` });
+    } else {
+      toast.success("积分与签到记录已刷新");
+    }
   }
 
   const totalRemaining = editionAccounts.reduce((sum, a) => sum + (creditMap[a.id]?.quota?.remaining ?? a.quota?.remaining ?? 0), 0);

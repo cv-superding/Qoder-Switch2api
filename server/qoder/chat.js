@@ -328,16 +328,20 @@ function parseLegacyLine(dataLine) {
   }
 
   const statusCode = Number(envelope?.statusCodeValue ?? envelope?.statusCode ?? envelope?.status ?? 0);
+  const codeValue = Number(envelope?.code ?? envelope?.errorCode ?? chunk?.code ?? chunk?.errorCode ?? 0);
   const chunkError =
     chunk?.error?.message ||
     (typeof chunk?.error === "string" ? chunk.error : "") ||
     envelope?.error?.message ||
     (typeof envelope?.error === "string" ? envelope.error : "");
-  const failed = (Number.isFinite(statusCode) && statusCode >= 400) || Boolean(chunkError);
+  const planGate = codeValue === 112;
+  const failed = (Number.isFinite(statusCode) && statusCode >= 400) || Boolean(chunkError) || planGate;
   if (failed) {
-    const detail = chunkError || chunk?.message || envelope?.message || envelope?.headers?.["error"] || "";
+    const detail = planGate
+      ? "模型计划不可用或额度受限（code 112）"
+      : chunkError || chunk?.message || envelope?.message || envelope?.headers?.["error"] || "";
     const suffix = detail ? `: ${String(detail).slice(0, 300)}` : "";
-    return [{ type: "error", error: `上游 HTTP ${statusCode >= 400 ? statusCode : "?"}${suffix}` }];
+    return [{ type: "error", error: planGate ? detail : `上游 HTTP ${statusCode >= 400 ? statusCode : "?"}${suffix}` }];
   }
   if (!chunk) return null;
   const events = [];
@@ -389,6 +393,7 @@ async function* legacyStream(req) {
     idleTimeoutMs: req.timeoutMs || 300000,
   });
   let sawDone = false;
+  let sawOutput = false;
   try {
     for (;;) {
       const line = await sse.nextLine();
@@ -401,10 +406,17 @@ async function* legacyStream(req) {
       }
       const events = parseLegacyLine(data);
       if (events) {
-        for (const event of events) yield event;
+        for (const event of events) {
+          if (event.type === "content" || event.type === "reasoning" || event.type === "tool_calls") sawOutput = true;
+          yield event;
+        }
       }
     }
-    // 旧版 Qoder SSE 正常结束时可能没有 [DONE]，EOF 即完成
+    // 旧版 Qoder SSE 正常结束时可能没有 [DONE]，EOF 即完成；但全空流不能伪装成功
+    if (!sawOutput) {
+      yield { type: "error", error: "上游未返回任何内容（可能被风控、模型不可用或计划受限）" };
+      return;
+    }
     yield { type: "done" };
   } catch (e) {
     yield { type: "error", error: String(e.message || e) };
@@ -560,6 +572,7 @@ async function* cloudStream(req) {
   let eventType = "";
   let dataLine = "";
   let sawTerminal = false;
+  let sawOutput = false;
   try {
     for (;;) {
       const line = await sse.nextLine();
@@ -592,8 +605,12 @@ async function* cloudStream(req) {
         }
         if (eventType === "agent.message") {
           const text = normalizeCloudContent(payload.content);
-          if (text) yield { type: "content", text };
+          if (text) {
+            sawOutput = true;
+            yield { type: "content", text };
+          }
         } else if (eventType === "agent.tool_use") {
+          sawOutput = true;
           yield {
             type: "tool_calls",
             toolCalls: [
@@ -612,7 +629,11 @@ async function* cloudStream(req) {
         dataLine = "";
       }
     }
-    // Cloud SSE 可能直接 EOF 结束；按正常完成处理
+    // Cloud SSE 可能直接 EOF 结束；但全空流不能伪装成功
+    if (!sawOutput) {
+      yield { type: "error", error: "上游未返回任何内容（可能被风控或会话异常）" };
+      return;
+    }
     yield { type: "done" };
   } catch (e) {
     yield { type: "error", error: String(e.message || e) };

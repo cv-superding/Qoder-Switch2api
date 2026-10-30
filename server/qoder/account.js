@@ -243,7 +243,9 @@ class AccountManager {
     const now = Date.now();
     // 过滤 token 过期的（有刷新令牌的除外——由调用方尝试刷新）
     const usable = candidates.filter((a) => !a.tokenExpireAt || a.tokenExpireAt > now || a.refreshToken);
-    const pool = usable.length > 0 ? usable : candidates;
+    const notExhausted = usable.filter((a) => !a.quota?.isQuotaExceeded);
+    // 上游明确标记额度用尽的账号排在最后，只有没有其它选择时才用
+    const pool = notExhausted.length > 0 ? notExhausted : usable.length > 0 ? usable : candidates;
     pool.sort((a, b) => quotaScore(b) - quotaScore(a) || (a.lastUsedAt || 0) - (b.lastUsedAt || 0));
     // 只在「剩余额度最高」的同级账号之间轮转，避免空号抢走请求
     const topScore = quotaScore(pool[0]);
@@ -328,6 +330,7 @@ class AccountManager {
 function quotaScore(a) {
   const q = a.quota;
   if (!q) return 0;
+  if (q.isQuotaExceeded) return 0;
   // 已过期的旧额度快照不能继续排在最前面
   if (typeof q.expiresAt === "number" && q.expiresAt > 0 && q.expiresAt < Date.now()) return 0;
   if (typeof q.remaining === "number" && typeof q.total === "number" && q.total > 0) {

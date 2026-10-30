@@ -548,9 +548,10 @@ export function createGateway(edition, getProxyConfig) {
     const model = (body.model || "auto").trim();
     const messages = anthropicToMessages(body);
     const imageUrls = collectImageUrls(messages);
+    const tools = anthropicToolsToOpenAI(body.tools);
     const wantStream = Boolean(body.stream);
 
-    const attempt = await runWithAccount(edition, model, { messages, tools: body.tools, imageUrls, api: "messages" });
+    const attempt = await runWithAccount(edition, model, { messages, tools, imageUrls, api: "messages" });
     if (!attempt.ok) {
       recordUsage({
         edition: editionValue,
@@ -841,6 +842,27 @@ function responsesToMessages(body) {
 }
 
 /** Anthropic Messages 请求 → 内部消息列表 */
+/** Anthropic {name,input_schema} → OpenAI {type:function,function:{name,parameters}} */
+function anthropicToolsToOpenAI(tools) {
+  if (!Array.isArray(tools)) return tools;
+  return tools
+    .map((tool) => {
+      if (!tool || typeof tool !== "object") return null;
+      if (tool.type === "function" && tool.function?.name) return tool;
+      const name = tool.name || tool.function?.name;
+      if (!name) return null;
+      return {
+        type: "function",
+        function: {
+          name,
+          description: tool.description || "",
+          parameters: tool.input_schema || tool.parameters || { type: "object", properties: {} },
+        },
+      };
+    })
+    .filter(Boolean);
+}
+
 function anthropicToMessages(body) {
   const messages = [];
   if (body.system) {

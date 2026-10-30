@@ -1038,12 +1038,13 @@ async fn messages(
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("auto").trim().to_string();
     let messages = anthropic_to_messages(&body);
     let image_urls = collect_image_urls(&messages);
+    let tools = anthropic_tools_to_openai(body.get("tools"));
     let result = run_with_account(
         &state,
         &edition_value,
         &normalize_model_key(&model),
         &messages,
-        body.get("tools").cloned(),
+        tools,
         image_urls,
         "messages",
         None,
@@ -1266,6 +1267,37 @@ fn responses_to_messages(body: &Value) -> Vec<Value> {
     messages
 }
 
+/// Anthropic {name,input_schema} → OpenAI {type:function,function:{name,parameters}}
+fn anthropic_tools_to_openai(tools: Option<&Value>) -> Option<Value> {
+    let list = tools?.as_array()?;
+    let converted: Vec<Value> = list
+        .iter()
+        .filter_map(|tool| {
+            if tool.get("type").and_then(|v| v.as_str()) == Some("function")
+                && tool.get("function").and_then(|f| f.get("name")).is_some()
+            {
+                return Some(tool.clone());
+            }
+            let name = tool
+                .get("name")
+                .or_else(|| tool.get("function").and_then(|f| f.get("name")))
+                .and_then(|v| v.as_str())?;
+            Some(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    "parameters": tool.get("input_schema")
+                        .or_else(|| tool.get("parameters"))
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+                }
+            }))
+        })
+        .collect();
+    Some(Value::Array(converted))
+}
+
 fn anthropic_to_messages(body: &Value) -> Vec<Value> {
     let mut messages = Vec::new();
     if let Some(system) = body.get("system") {
@@ -1365,7 +1397,8 @@ fn uuid_simple() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_model_request;
+    use super::{anthropic_tools_to_openai, resolve_model_request};
+    use serde_json::json;
 
     #[test]
     fn resolves_display_names_and_effort_suffixes() {
@@ -1381,5 +1414,19 @@ mod tests {
     #[test]
     fn keeps_unknown_models_unchanged() {
         assert_eq!(resolve_model_request("my-custom-model"), ("my-custom-model".into(), None));
+    }
+
+    #[test]
+    fn converts_anthropic_tools_to_openai() {
+        let input = json!([{
+            "name": "Read",
+            "description": "read a file",
+            "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } }
+        }]);
+        let converted = anthropic_tools_to_openai(Some(&input)).unwrap();
+        let first = &converted.as_array().unwrap()[0];
+        assert_eq!(first["type"], "function");
+        assert_eq!(first["function"]["name"], "Read");
+        assert_eq!(first["function"]["parameters"]["type"], "object");
     }
 }

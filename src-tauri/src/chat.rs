@@ -413,19 +413,32 @@ fn parse_legacy_line(data: &str) -> Vec<ChatEvent> {
     } else {
         error_text(chunk.get("error").unwrap_or(&Value::Null))
     };
-    if status_code >= 400 || !chunk_error.is_empty() {
-        let detail = if !chunk_error.is_empty() {
+    let code_value = envelope
+        .get("code")
+        .or_else(|| envelope.get("errorCode"))
+        .or_else(|| chunk.get("code"))
+        .or_else(|| chunk.get("errorCode"))
+        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(0);
+    if status_code >= 400 || !chunk_error.is_empty() || code_value == 112 {
+        let detail = if code_value == 112 {
+            "模型计划不可用或额度受限（code 112）".to_string()
+        } else if !chunk_error.is_empty() {
             chunk_error
         } else if !chunk.is_null() {
             error_text(&chunk)
         } else {
             error_text(&envelope)
         };
-        return vec![ChatEvent::Error(format!(
-            "上游 HTTP {}: {}",
-            if status_code >= 400 { status_code.to_string() } else { "?".into() },
-            detail.chars().take(300).collect::<String>()
-        ))];
+        return vec![ChatEvent::Error(if code_value == 112 {
+            detail
+        } else {
+            format!(
+                "上游 HTTP {}: {}",
+                if status_code >= 400 { status_code.to_string() } else { "?".into() },
+                detail.chars().take(300).collect::<String>()
+            )
+        })];
     }
     if chunk.is_null() {
         return Vec::new();
@@ -537,6 +550,7 @@ fn legacy_stream(
         let mut buffer = String::new();
         let mut stream = resp.bytes_stream();
         let mut saw_done = false;
+        let mut saw_output = false;
         use futures_util::StreamExt;
         loop {
             let chunk = match tokio::time::timeout(std::time::Duration::from_millis(timeout), stream.next()).await {
@@ -562,6 +576,9 @@ fn legacy_stream(
                         break;
                     }
                     for event in parse_legacy_line(data) {
+                        if matches!(event, ChatEvent::Content(_) | ChatEvent::Reasoning(_) | ChatEvent::ToolCalls(_)) {
+                            saw_output = true;
+                        }
                         yield event;
                     }
                 }
@@ -570,8 +587,12 @@ fn legacy_stream(
                 break;
             }
         }
-        // 旧版 Qoder SSE 正常结束时可能没有 [DONE]，EOF 即完成
+        // 旧版 Qoder SSE 正常结束时可能没有 [DONE]，EOF 即完成；全空流不能伪装成功
         let _ = saw_done;
+        if !saw_output {
+            yield ChatEvent::Error("上游未返回任何内容（可能被风控、模型不可用或计划受限）".into());
+            return;
+        }
         yield ChatEvent::Done;
     }
 }
@@ -802,6 +823,7 @@ fn cloud_stream(req: ChatRequest, edition: Edition) -> impl Stream<Item = ChatEv
         let mut buffer = String::new();
         let mut event_type = String::new();
         let mut data_line = String::new();
+        let mut saw_output = false;
         let mut stream = resp.bytes_stream();
         let read_timeout = std::time::Duration::from_millis(if req.timeout_ms > 0 { req.timeout_ms } else { 300_000 });
         use futures_util::StreamExt;
@@ -848,10 +870,12 @@ fn cloud_stream(req: ChatRequest, edition: Edition) -> impl Stream<Item = ChatEv
                         "agent.message" => {
                             let text = normalize_cloud_content(payload.get("content").unwrap_or(&Value::Null));
                             if !text.is_empty() {
+                                saw_output = true;
                                 yield ChatEvent::Content(text);
                             }
                         }
                         "agent.tool_use" => {
+                            saw_output = true;
                             let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
                             let input = payload.get("input").cloned().unwrap_or(json!({}));
                             let call_id = format!("call_{}", &uuid().replace('-', "").chars().take(12).collect::<String>());
@@ -867,6 +891,10 @@ fn cloud_stream(req: ChatRequest, edition: Edition) -> impl Stream<Item = ChatEv
                     data_line.clear();
                 }
             }
+        }
+        if !saw_output {
+            yield ChatEvent::Error("上游未返回任何内容（可能被风控或会话异常）".into());
+            return;
         }
         yield ChatEvent::Done;
     }

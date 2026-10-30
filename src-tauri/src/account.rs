@@ -742,7 +742,18 @@ impl AccountManager {
             })
             .cloned()
             .collect();
-        let mut sorted: Vec<Account> = if usable.is_empty() { candidates.clone() } else { usable };
+        let not_exhausted: Vec<Account> = usable
+            .iter()
+            .filter(|a| !a.quota.as_ref().and_then(|q| q.is_quota_exceeded).unwrap_or(false))
+            .cloned()
+            .collect();
+        let mut sorted: Vec<Account> = if !not_exhausted.is_empty() {
+            not_exhausted
+        } else if usable.is_empty() {
+            candidates.clone()
+        } else {
+            usable
+        };
         sorted.sort_by(|a, b| {
             let sa = quota_score(a);
             let sb = quota_score(b);
@@ -908,6 +919,9 @@ fn apply_normalized(account: &mut Account, n: &NormalizedAccount, now: i64) {
 fn quota_score(a: &Account) -> f64 {
     match &a.quota {
         Some(q) => {
+            if q.is_quota_exceeded.unwrap_or(false) {
+                return 0.0;
+            }
             // 已过期的旧额度快照不能继续排在最前面
             if q.expires_at.map(|t| t > 0 && t < now_ms()).unwrap_or(false) {
                 return 0.0;

@@ -453,7 +453,7 @@ fn running_client_exe(edition: &Edition) -> Option<String> {
     {
         let script = r#"
 Get-Process -ErrorAction SilentlyContinue |
-  Where-Object { $_.ProcessName -eq 'Qoder' -or $_.ProcessName -eq 'QoderCN' } |
+  Where-Object { $_.ProcessName -in @('Qoder','QoderCN','Qoder CN') } |
   ForEach-Object { try { $_.Path } catch {} } |
   Where-Object { $_ } |
   Select-Object -Unique
@@ -739,7 +739,24 @@ where
         status: "running".into(),
         detail: String::new(),
     });
-    let killed = kill_client_processes(exe.as_deref().unwrap_or(""));
+    let mut killed = kill_client_processes(exe.as_deref().unwrap_or(""));
+    // 自定义数据目录时不能按全局进程名推断，避免误杀另一个安装
+    if killed == 0 && override_dir.trim().is_empty() {
+        // 启动器/版本目录变化时按实际运行路径再结束一次
+        if let Some(running) = running_client_exe(edition) {
+            if Some(running.as_str()) != exe.as_deref() {
+                killed = kill_client_processes(&running);
+            }
+        }
+    }
+    if override_dir.trim().is_empty() && running_client_exe(edition).is_some() {
+        on_step(SwitchStep {
+            name: "结束 Qoder 进程".into(),
+            status: "error".into(),
+            detail: "客户端仍在运行，无法结束进程".into(),
+        });
+        return Err("Qoder 客户端仍在运行，无法安全写入登录态。请手动关闭 Qoder 后重试".into());
+    }
     on_step(SwitchStep {
         name: "结束 Qoder 进程".into(),
         status: "done".into(),
@@ -748,7 +765,7 @@ where
         } else if exe.is_some() {
             "未发现运行中的客户端进程".into()
         } else {
-            "未定位客户端可执行文件，已跳过结束进程（请手动关闭 Qoder 后重试）".into()
+            "未定位客户端可执行文件（客户端未运行）".into()
         },
     });
 

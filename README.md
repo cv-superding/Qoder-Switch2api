@@ -175,6 +175,16 @@ Cloud Agents 文档。个别未公开字段（如 CN 版 OAuth client_id）标�
 
 ## 更新日志
 
+### v1.1.26
+
+- 对照 cpa-multi-plugins / qoder2api-hub / QoderGateway / Qoder-Daily / Qoder-Switch 复核签到、额度、更新和反代实现
+- 修复更新包 SHA-256 丢失导致镜像与校验全部失效；独立服务版更新时改为下载 `qoder-server.exe`，不会把服务版替换成桌面版
+- 修复切换时客户端未真正关闭仍写入登录态并提示成功；自定义数据目录不再按全局进程误杀另一个 Qoder
+- 修复上游计划受限（code 112）与空流被当作成功：现在会换号/报错，不再返回空完成
+- Anthropic `/v1/messages` 的工具定义转换为 OpenAI function 格式，Claude Code 工具调用兼容性提升
+- 额度已标记用尽的账号不再优先参与轮转；积分刷新失败会明确提示，不再一律 toast 成功
+- 修复 Rust「上次续期」状态永远为空，并补充更新摘要与 Anthropic 工具转换单元测试
+
 ### v1.1.25
 
 - 应用内更新不再闪黑窗：旧的 `.cmd` 每 500ms 拉起 `tasklist`/`powershell` 的循环，改为单个隐藏 PowerShell 完成等待、替换和重启

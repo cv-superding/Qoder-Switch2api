@@ -112,20 +112,30 @@ fn normalize(release: &Value) -> Value {
                         "name": asset.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                         "url": asset.get("browser_download_url").and_then(|v| v.as_str()).unwrap_or(""),
                         "size": asset.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "digest": asset.get("digest").and_then(|v| v.as_str()).unwrap_or(""),
                     })
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let is_server = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .map(|n| n.contains("server"))
+        .unwrap_or(false);
+    let preferred_name = if is_server { "qoder-server.exe" } else { "qoder-switch2api.exe" };
     let exe_asset = assets
         .iter()
-        .find(|asset| asset.get("name").and_then(|v| v.as_str()) == Some("qoder-switch2api.exe"))
+        .find(|asset| asset.get("name").and_then(|v| v.as_str()) == Some(preferred_name))
         .or_else(|| {
             assets.iter().find(|asset| {
                 asset
                     .get("name")
                     .and_then(|v| v.as_str())
-                    .map(|name| name.to_ascii_lowercase().ends_with(".exe"))
+                    .map(|name| {
+                        let lower = name.to_ascii_lowercase();
+                        lower.ends_with(".exe") && !lower.contains("setup")
+                    })
                     .unwrap_or(false)
             })
         });
@@ -483,5 +493,28 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
     #[cfg(not(windows))]
     {
         Err("仅 Windows 桌面版支持自动替换".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_keeps_asset_digest_for_mirror_verification() {
+        let release = json!({
+            "tag_name": "v9.9.9",
+            "html_url": "https://example.invalid/release",
+            "assets": [{
+                "name": "qoder-switch2api.exe",
+                "browser_download_url": "https://example.invalid/app.exe",
+                "size": 123,
+                "digest": "sha256:abc123"
+            }]
+        });
+        let normalized = normalize(&release);
+        assert_eq!(normalized["downloadUrl"], "https://example.invalid/app.exe");
+        assert_eq!(normalized["digest"], "sha256:abc123");
     }
 }

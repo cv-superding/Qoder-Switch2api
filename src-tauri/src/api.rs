@@ -549,7 +549,7 @@ async fn get_keepalive_status(State(state): State<Arc<AppState>>) -> Response {
     let last: Value = crate::store::load_json("keepalive-state.json");
     ok_json(json!({
         "enabled": enabled,
-        "last": if last.get("result").is_some() { last } else { Value::Null }
+        "last": if last.get("at").is_some() { last } else { Value::Null }
     }))
 }
 
@@ -561,7 +561,7 @@ async fn get_auto_checkin_status(State(state): State<Arc<AppState>>) -> Response
     let last: Value = crate::store::load_json("checkin-state.json");
     ok_json(json!({
         "autoCheckin": { "enabled": enabled, "hour": hour },
-        "last": if last.get("result").is_some() { last } else { Value::Null }
+        "last": if last.get("at").is_some() { last } else { Value::Null }
     }))
 }
 

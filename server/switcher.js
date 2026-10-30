@@ -91,7 +91,7 @@ async function findRunningClientExe(edition) {
   if (process.platform !== "win32") return null;
   const script = `
 Get-Process -ErrorAction SilentlyContinue |
-  Where-Object { $_.ProcessName -eq 'Qoder' -or $_.ProcessName -eq 'QoderCN' } |
+  Where-Object { $_.ProcessName -in @('Qoder','QoderCN','Qoder CN') } |
   ForEach-Object { try { $_.Path } catch {} } |
   Where-Object { $_ } |
   Select-Object -Unique
@@ -356,7 +356,19 @@ export async function switchClientAccount(accountId, { restart = true, onStep } 
   step("备份当前登录态", "done", backup ? `已备份到 ${path.basename(backup)}` : "无现有登录态，跳过备份");
 
   step("结束 Qoder 进程", "running");
-  const killed = await killClientProcesses(exe);
+  let killed = await killClientProcesses(exe);
+  // 指定了自定义数据目录时，不能按全局进程名推断（可能误杀另一个安装）
+  const overrideDir = settings.clientDirOverrides?.[account.edition] || "";
+  if (killed === 0 && !overrideDir) {
+    // 启动器路径或版本目录变化时，按实际运行的进程路径再结束一次
+    const running = await findRunningClientExe(edition);
+    if (running && running !== exe) killed = await killClientProcesses(running);
+  }
+  const stillRunning = overrideDir ? null : await findRunningClientExe(edition);
+  if (stillRunning) {
+    step("结束 Qoder 进程", "error", "客户端仍在运行，无法结束进程");
+    throw new Error("Qoder 客户端仍在运行，无法安全写入登录态。请手动关闭 Qoder 后重试");
+  }
   step(
     "结束 Qoder 进程",
     "done",
@@ -364,12 +376,12 @@ export async function switchClientAccount(accountId, { restart = true, onStep } 
       ? `已结束 ${killed} 个进程`
       : exe
         ? "未发现运行中的客户端进程"
-        : "未定位客户端可执行文件，已跳过结束进程（请手动关闭 Qoder 后重试）",
+        : "未定位客户端可执行文件（客户端未运行）",
   );
 
   step("写入目标账号", "running");
   if (fs.existsSync(authDat)) {
-    await writeAuthDat(dir, authDat, account);
+    await writeAuthDat(dir, authDat, account, edition);
     step("写入目标账号", "done", "auth.v1.dat 已更新");
   } else if (fs.existsSync(vscdb)) {
     await writeVscdbAuth(vscdb, account);

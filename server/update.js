@@ -122,6 +122,7 @@ function normalize(release) {
         name: String(asset.name || ""),
         url: String(asset.browser_download_url || ""),
         size: Number(asset.size) || 0,
+        digest: String(asset.digest || ""),
       }))
     : [];
   const exe =
