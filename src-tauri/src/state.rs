@@ -52,6 +52,8 @@ pub struct Settings {
     #[serde(default)]
     pub auto_checkin: AutoCheckin,
     #[serde(default)]
+    pub auto_checkin_migrated: bool,
+    #[serde(default)]
     pub endpoint_overrides: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub proxy: std::collections::HashMap<String, ProxyConfig>,
@@ -93,7 +95,8 @@ impl Default for Settings {
             token_keepalive: true,
             client_dir_overrides: Default::default(),
             client_exe_paths: Default::default(),
-            auto_checkin: AutoCheckin { enabled: false, hour: 10 },
+            auto_checkin: AutoCheckin { enabled: true, hour: 10 },
+            auto_checkin_migrated: true,
             endpoint_overrides: Default::default(),
             proxy,
         }
@@ -110,6 +113,14 @@ impl AppState {
         let accounts = AccountManager::load();
         let mut settings = crate::store::load_json::<Settings>("settings.json");
         settings.auto_checkin.hour = settings.auto_checkin.hour.clamp(0, 23);
+        if !settings.auto_checkin_migrated {
+            if !settings.auto_checkin.enabled && settings.auto_checkin.hour <= 9 {
+                settings.auto_checkin.enabled = true;
+                settings.auto_checkin.hour = 10;
+            }
+            settings.auto_checkin_migrated = true;
+            crate::store::save_json("settings.json", &settings);
+        }
         Arc::new(AppState {
             accounts: RwLock::new(accounts),
             settings: RwLock::new(settings),

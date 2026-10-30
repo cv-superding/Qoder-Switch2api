@@ -31,7 +31,8 @@ function defaultSettings() {
     tokenKeepalive: true,
     clientDirOverrides: { domestic: "", international: "" },
     clientExePaths: { domestic: "", international: "" },
-    autoCheckin: { enabled: false, hour: 10 },
+    autoCheckin: { enabled: true, hour: 10 },
+    autoCheckinMigrated: true,
     endpointOverrides: { domestic: {}, international: {} },
     proxy: {
       domestic: {
@@ -63,8 +64,16 @@ settings.proxy = {
 const configuredHour = Number(settings.autoCheckin?.hour);
 settings.autoCheckin = {
   enabled: Boolean(settings.autoCheckin?.enabled),
-  hour: Number.isFinite(configuredHour) ? Math.max(0, Math.min(23, Math.round(configuredHour))) : 9,
+  hour: Number.isFinite(configuredHour) ? Math.max(0, Math.min(23, Math.round(configuredHour))) : 10,
 };
+// 旧版本默认是关闭 + 9:00，升级后自动切到开启 + 10:00；只迁移一次
+if (settings.autoCheckinMigrated !== true) {
+  if (!settings.autoCheckin.enabled && settings.autoCheckin.hour <= 9) {
+    settings.autoCheckin = { enabled: true, hour: 10 };
+  }
+  settings.autoCheckinMigrated = true;
+  saveJson("settings.json", settings);
+}
 
 setSwitcherSettings(settings);
 
