@@ -478,9 +478,10 @@ export function AccountCard({
 
         <footer className="flex flex-wrap items-center gap-1.5 border-t border-border/70 bg-muted/20 px-3 py-2.5">
           {clientActive ? (
-            <span className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-primary/20 bg-primary/[0.06] px-2.5 text-[11.5px] font-medium text-primary">
-              <Mark size={16} />
-              客户端当前
+            <span className="inline-flex h-9 items-center gap-2 rounded-xl border border-primary/30 bg-gradient-to-r from-primary/10 via-primary/15 to-primary/10 px-3 text-[11.5px] font-semibold text-primary shadow-[inset_0_1px_0_oklch(1_0_0/15%)]">
+              <Mark size={18} className="shrink-0" />
+              <span className="tracking-wide">客户端当前</span>
+              <div className="ml-1 inline-flex h-2 w-2 shrink-0 animate-pulse items-center justify-center rounded-full bg-primary" />
             </span>
           ) : (
             <Button
