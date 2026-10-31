@@ -105,6 +105,9 @@ async fn run_bridge(exe: &Path, env_code: &str, uid: &str) -> Option<MachineIden
     if let Some(dir) = exe.parent() {
         cmd.current_dir(dir);
     }
+    // 原生桥是控制台程序：不隐藏会闪黑窗
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
     let use_stdin = (cfg!(windows) || cfg!(target_os = "macos")) && !uid.is_empty();
     if use_stdin {
         cmd.arg("--account-stdin");

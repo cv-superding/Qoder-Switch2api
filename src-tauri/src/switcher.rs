@@ -684,8 +684,14 @@ pub fn find_client_exe(edition: &Edition) -> Option<String> {
 }
 
 pub fn launch_client(exe_path: &str) -> Result<(), String> {
-    Command::new(exe_path)
-        .spawn()
+    let mut cmd = Command::new(exe_path);
+    // 即使误启动到控制台包装器也不要闪黑窗
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("启动客户端失败: {}", e))
 }

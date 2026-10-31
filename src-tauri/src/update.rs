@@ -52,10 +52,13 @@ fn system_proxy() -> Option<String> {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         use std::process::Command;
         const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+        // reg 是控制台程序：不隐藏会闪黑窗（更新检查/切换时都能被看到）
         let enabled = Command::new("reg")
             .args(["query", KEY, "/v", "ProxyEnable"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .output()
             .ok()?;
         if !String::from_utf8_lossy(&enabled.stdout).to_ascii_lowercase().contains("0x1") {
@@ -63,6 +66,7 @@ fn system_proxy() -> Option<String> {
         }
         let output = Command::new("reg")
             .args(["query", KEY, "/v", "ProxyServer"])
+            .creation_flags(0x0800_0000)
             .output()
             .ok()?;
         let text = String::from_utf8_lossy(&output.stdout).to_string();
