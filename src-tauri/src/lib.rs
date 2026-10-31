@@ -16,6 +16,7 @@ pub mod editions;
 pub mod gateway;
 pub mod http;
 pub mod info;
+pub mod machine_identity;
 pub mod oauth;
 pub mod paths;
 pub mod sessions;

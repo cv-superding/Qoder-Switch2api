@@ -4,6 +4,8 @@
  */
 import { fetchJson } from "../http.js";
 import { buildModelListHeaders, legacyDecode } from "./cosy.js";
+import { EDITIONS } from "../editions.js";
+import { clientVersionFromExe, deriveMachineId, getMachineIdentity, hostName, machineOs } from "./machine-identity.js";
 
 function openApi(edition, p) {
   return edition.oauth.openApiBaseUrl + p;
@@ -29,15 +31,52 @@ function normalizeTime(raw) {
  * 计费接口的统一身份头。
  * campaigns 接口缺少 Cosy-ClientType / Cosy-Version 时会静默返回空活动列表，
  * 表现为「永远没有签到活动」；官方桌面端在所有 sash/billing 请求上都会带。
+ *
+ * 国际版的「每日领取 100 Credits」还要求**真实机器身份**（官方 runtime-info
+ * 原生桥输出）：缺机器头或发派生假头时，服务端会把签到活动整条过滤掉，列表
+ * 只剩营销活动（issue #10）。拿到真实身份时才发 Cosy-Machine* 六头。
  */
-function authHeaders(account) {
-  return {
+async function authHeaders(edition, account, { withBody = false } = {}) {
+  const headers = {
     Authorization: `Bearer ${account.securityOauthToken || account.pat}`,
     Accept: "application/json",
     "User-Agent": "Qoder",
     "Cosy-ClientType": "10",
-    "Cosy-Version": "0.4.3",
+    "Cosy-Version": DEFAULT_DESKTOP_VERSION,
   };
+  if (edition?.value === "international") {
+    const ident = await getMachineIdentity(edition.value, { uid: account.uid }).catch(() => null);
+    if (ident) {
+      headers["Cosy-MachineId"] = deriveMachineId(account.uid);
+      headers["Cosy-MachineToken"] = ident.machineToken;
+      headers["Cosy-MachineType"] = ident.machineType;
+      headers["Cosy-MachineCode"] = ident.machineCode;
+      headers["Cosy-MachineOS"] = machineOs();
+      headers["Cosy-MachineHostname"] = hostName();
+    }
+  }
+  if (withBody) headers["Content-Type"] = "application/json";
+  return headers;
+}
+
+/** 桌面端版本号（Cosy-Version）：优先跟随已安装客户端，否则回退 */
+const DEFAULT_DESKTOP_VERSION = "0.4.8";
+
+async function desktopVersion(edition) {
+  try {
+    const switcher = await import("../switcher.js");
+    const exe = await switcher.findClientExe(EDITIONS[edition.value] ?? edition);
+    return clientVersionFromExe(exe || "", DEFAULT_DESKTOP_VERSION);
+  } catch {
+    return DEFAULT_DESKTOP_VERSION;
+  }
+}
+
+/** 活动平台（campaigns / claim）请求头：在统一身份头上补桌面端版本 */
+async function campaignHeaders(edition, account, opts) {
+  const headers = await authHeaders(edition, account, opts);
+  headers["Cosy-Version"] = await desktopVersion(edition);
+  return headers;
 }
 
 function quotaPart(raw) {
@@ -134,7 +173,7 @@ function combineQuota(plan, addOn, packages = [], shared = null) {
 /** 额度用量：/api/v2/quota/usage */
 export async function getQuotaUsage(edition, account) {
   const result = await fetchJson(openApi(edition, edition.oauth.quotaUsagePath), {
-    headers: authHeaders(account),
+    headers: await authHeaders(edition, account),
     timeoutMs: 20000,
   });
   if (!result.ok) throw new Error(`额度查询 HTTP ${result.status}: ${(result.text || "").slice(0, 200)}`);
@@ -156,7 +195,7 @@ export async function getQuotaUsage(edition, account) {
 /** 订阅计划：/api/v2/user/plan */
 export async function getUserPlan(edition, account) {
   const result = await fetchJson(openApi(edition, edition.oauth.userPlanPath), {
-    headers: authHeaders(account),
+    headers: await authHeaders(edition, account),
     timeoutMs: 20000,
   });
   if (!result.ok) throw new Error(`订阅查询 HTTP ${result.status}: ${(result.text || "").slice(0, 200)}`);
@@ -173,7 +212,7 @@ export async function getUserPlan(edition, account) {
 /** 个人用量汇总：/sash/api/v2/me/usage */
 export async function getMeUsage(edition, account) {
   const result = await fetchJson(openApi(edition, edition.oauth.meUsagePath), {
-    headers: authHeaders(account),
+    headers: await authHeaders(edition, account),
     timeoutMs: 20000,
   }).catch(() => null);
   if (!result || !result.ok) return null;
@@ -187,7 +226,7 @@ export async function getMeUsage(edition, account) {
  */
 export async function listCampaigns(edition, account) {
   const result = await fetchJson(openApi(edition, edition.oauth.campaignsPath), {
-    headers: authHeaders(account),
+    headers: await campaignHeaders(edition, account),
     timeoutMs: 20000,
   });
   if (!result.ok) throw new Error(`活动查询 HTTP ${result.status}: ${(result.text || "").slice(0, 200)}`);
@@ -294,7 +333,7 @@ export async function claimCampaign(edition, account, campaignId) {
   const url = `${openApi(edition, edition.oauth.claimPath)}/${encodeURIComponent(campaignId)}/claim`;
   const result = await fetchJson(url, {
     method: "POST",
-    headers: { ...authHeaders(account), "Content-Type": "application/json" },
+    headers: await campaignHeaders(edition, account, { withBody: true }),
     body: "{}",
     timeoutMs: 20000,
   });

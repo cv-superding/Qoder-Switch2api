@@ -276,9 +276,54 @@ pub async fn get_me_usage(edition: &Edition, account: &Account) -> Option<Value>
     get_json(edition, account, &edition.oauth.me_usage_path).await.ok()
 }
 
+/// 活动平台（campaigns / claim）请求头。
+///
+/// 国际版的「每日领取 100 Credits」要求**真实机器身份**：缺 Cosy-Machine*
+/// 六头或发派生假头时，服务端会把签到活动整条过滤掉，只剩营销活动。
+/// 只有原生桥返回真实身份时才发机器头（与官方桌面端一致）。
+async fn campaign_headers(edition: &Edition, account: &Account, with_body: bool) -> Vec<(&'static str, String)> {
+    let desktop_version = crate::switcher::find_client_exe(edition)
+        .map(|exe| crate::machine_identity::client_version_from_exe(&exe, "0.4.8"))
+        .unwrap_or_else(|| "0.4.8".to_string());
+    let mut headers: Vec<(&'static str, String)> = vec![
+        ("Authorization", auth_header(account)),
+        ("Accept", "application/json".into()),
+        ("User-Agent", "Qoder".into()),
+        ("Cosy-ClientType", "10".into()),
+        ("Cosy-Version", desktop_version),
+    ];
+    if let Some(ident) = crate::machine_identity::get_machine_identity(edition, &account.uid).await {
+        headers.push(("Cosy-MachineId", crate::machine_identity::derive_machine_id(&account.uid)));
+        headers.push(("Cosy-MachineToken", ident.machine_token));
+        headers.push(("Cosy-MachineType", ident.machine_type));
+        headers.push(("Cosy-MachineCode", ident.machine_code));
+        headers.push(("Cosy-MachineOS", crate::machine_identity::machine_os().to_string()));
+        if let Ok(host) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
+            if !host.is_empty() {
+                headers.push(("Cosy-MachineHostname", host));
+            }
+        }
+    }
+    if with_body {
+        headers.push(("Content-Type", "application/json".into()));
+    }
+    headers
+}
+
 pub async fn list_campaigns(edition: &Edition, account: &Account) -> Result<Vec<Value>, String> {
     // 不带 forceRefresh：带上它会让未打开过活动页的账号被上游过滤掉每日签到行
-    let data = get_json(edition, account, &edition.oauth.campaigns_path).await?;
+    let headers = campaign_headers(edition, account, false).await;
+    let mut req = crate::http::client().get(open_api(edition, &edition.oauth.campaigns_path));
+    for (key, value) in headers {
+        req = req.header(key, value);
+    }
+    let resp = req.send().await.map_err(|e| format!("请求失败: {}", e))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>()));
+    }
+    let data: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     Ok(match &data {
         Value::Array(arr) => arr.clone(),
         Value::Object(obj) => obj
@@ -419,15 +464,12 @@ pub async fn claim_campaign(edition: &Edition, account: &Account, campaign_id: &
         open_api(edition, &edition.oauth.claim_path).trim_end_matches('/'),
         campaign_id
     );
-    let resp = crate::http::client()
-        .post(&url)
-        .header("Authorization", auth_header(account))
-        .header("Accept", "application/json")
-        .header("User-Agent", "Qoder")
-        .header("Cosy-ClientType", "10")
-        .header("Cosy-Version", "0.4.3")
-        .header("Content-Type", "application/json")
-        .body("{}")
+    let headers = campaign_headers(edition, account, true).await;
+    let mut req = crate::http::client().post(&url).body("{}");
+    for (key, value) in headers {
+        req = req.header(key, value);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("领取失败: {}", e))?;
