@@ -30,7 +30,7 @@ import { useAccountsStore } from "@/stores/accounts";
 export default function AccountsPage() {
   const {
     accounts, status, loading, error, fetchAll, deleteAccount, importLocal,
-    creditMap, creditLoadingMap, creditErrorMap, refreshingCredits, ensureCredits, refreshCredits, setAccountGroupLocal,
+    creditMap, creditLoadingMap, creditErrorMap, refreshingCredits, ensureCredits, refreshCredits, setAccountGroupLocal, setAccountLabelLocal,
   } = useAccountsStore();
 
   const [editionTab, setEditionTab] = useState<Edition>(() => {
@@ -235,6 +235,16 @@ export default function AccountsPage() {
       toast.success("分组已更新", { description: `${a.name || a.uid} → ${accountGroupLabel(group)}` });
     } catch (e) {
       toast.error("分组设置失败", { description: api.asError(e) });
+    }
+  }
+
+  async function onRename(a: Account, label: string) {
+    try {
+      await api.api.updateAccount(a.id, { label });
+      setAccountLabelLocal(a.id, label);
+      toast.success(label ? `已重命名为「${label}」` : "已恢复上游账号名");
+    } catch (e) {
+      toast.error("重命名失败", { description: api.asError(e) });
     }
   }
 
@@ -515,6 +525,7 @@ export default function AccountsPage() {
                 onCheckin={onCheckin}
                 onRefreshCredit={(acc) => void refreshCredits([acc.id])}
                 onSetGroup={onSetGroup}
+                onRename={onRename}
               />
             ))}
           </div>

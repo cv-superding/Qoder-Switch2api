@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  ArrowLeftRight, Check, CircleCheck, Clock3, Coins, Ellipsis, Loader2, RefreshCw, Sparkles, Trash2, TriangleAlert,
+  ArrowLeftRight, Check, CircleCheck, Clock3, Coins, Ellipsis, Loader2, PencilLine, RefreshCw, Sparkles, Trash2, TriangleAlert,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { QoderCnMark, QoderMark } from "@/components/product-marks";
 import { cn } from "@/lib/utils";
@@ -87,17 +88,19 @@ interface Props {
   onCheckin: (a: Account) => void;
   onRefreshCredit: (a: Account) => void;
   onSetGroup: (a: Account, group: string) => void;
+  onRename: (a: Account, label: string) => void;
   checkinState?: CheckinState;
 }
 
 export function AccountCard({
   account, compact = false, credit, creditLoading, creditError, clientActive, clientBusy, clientLoading,
-  onSwitch, onDelete, onRefresh, onCheckin, onRefreshCredit, onSetGroup, checkinState,
+  onSwitch, onDelete, onRefresh, onCheckin, onRefreshCredit, onSetGroup, onRename, checkinState,
 }: Props) {
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const intl = isInternational(account);
   const Mark = intl ? QoderMark : QoderCnMark;
-  const displayName = account.name || account.email || account.phone || account.uid || "未命名账号";
+  const displayName = account.label || account.name || account.email || account.phone || account.uid || "未命名账号";
   const quota = account.quota;
   const remaining = credit?.quota?.remaining ?? quota?.remaining ?? null;
   const total = credit?.quota?.total ?? quota?.total ?? null;
@@ -207,6 +210,9 @@ export function AccountCard({
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onCheckin(account)} disabled={!canCheckin}>
           <CircleCheck />手动签到
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => setRenameOpen(true)}>
+          <PencilLine />重命名
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>加入分组</DropdownMenuLabel>
@@ -328,6 +334,15 @@ export function AccountCard({
         </article>
 
         <DeleteDialog open={deleteOpen} onOpenChange={setDeleteOpen} name={displayName} onConfirm={() => onDelete(account)} />
+        {renameOpen ? (
+          <RenameDialog
+            open
+            onOpenChange={setRenameOpen}
+            initial={account.label || ""}
+            placeholder={account.name || account.email || account.phone || account.uid || ""}
+            onConfirm={(label) => onRename(account, label)}
+          />
+        ) : null}
       </TooltipProvider>
     );
   }
@@ -536,7 +551,64 @@ export function AccountCard({
       </article>
 
       <DeleteDialog open={deleteOpen} onOpenChange={setDeleteOpen} name={displayName} onConfirm={() => onDelete(account)} />
+      {renameOpen ? (
+        <RenameDialog
+          open
+          onOpenChange={setRenameOpen}
+          initial={account.label || ""}
+          placeholder={account.name || account.email || account.phone || account.uid || ""}
+          onConfirm={(label) => onRename(account, label)}
+        />
+      ) : null}
     </TooltipProvider>
+  );
+}
+
+function RenameDialog({
+  open, onOpenChange, initial, placeholder, onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  initial: string;
+  placeholder: string;
+  onConfirm: (label: string) => void;
+}) {
+  const [value, setValue] = useState(initial);
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>重命名账号</DialogTitle>
+          <DialogDescription>
+            设置一个便于识别的备注名，留空则恢复显示上游账号名。不影响登录与切换。
+          </DialogDescription>
+        </DialogHeader>
+        <Input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={placeholder || "备注名"}
+          maxLength={40}
+          autoFocus
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              onConfirm(value.trim());
+              onOpenChange(false);
+            }
+          }}
+        />
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button
+            onClick={() => {
+              onConfirm(value.trim());
+              onOpenChange(false);
+            }}
+          >
+            保存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

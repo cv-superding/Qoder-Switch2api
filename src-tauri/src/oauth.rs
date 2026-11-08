@@ -357,7 +357,10 @@ pub async fn poll_login(login_id: &str) -> LoginOutcome {
         phone: info_json
             .get("phone")
             .and_then(|v| v.as_str())
+            .or_else(|| info_json.get("security_mobile").and_then(|v| v.as_str()))
+            .or_else(|| info_json.get("securityMobile").and_then(|v| v.as_str()))
             .or_else(|| status_json.get("phone").and_then(|v| v.as_str()))
+            .or_else(|| status_json.get("security_mobile").and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string(),
         avatar_url: info_json
@@ -455,6 +458,22 @@ pub struct RefreshResult {
     /// jobToken 返回的到期时间（毫秒）
     #[serde(default, alias = "expires_in", alias = "expiresIn")]
     pub expires_in: Option<f64>,
+}
+
+/// 拉取 userinfo：回填手机号等缺失字段（上游手机号字段为 security_mobile）
+pub async fn fetch_profile(edition: &Edition, token: &str) -> Option<serde_json::Value> {
+    let client = crate::http::client();
+    let auth = format!("Bearer {}", token);
+    fetch_json(
+        &client,
+        &format!("{}{}", edition.oauth.open_api_base_url, edition.oauth.user_info_path),
+        &[
+            ("Authorization", auth.as_str()),
+            ("Accept", "application/json"),
+            ("User-Agent", "Qoder"),
+        ],
+    )
+    .await
 }
 
 /// 用 refresh_token / PAT 续期。

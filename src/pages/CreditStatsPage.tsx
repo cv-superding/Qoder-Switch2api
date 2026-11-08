@@ -203,10 +203,10 @@ export default function CreditStatsPage() {
                       <td className="px-5 py-3">
                         <div className="flex items-center gap-2.5">
                           <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/[0.08] text-[10.5px] font-semibold text-primary">
-                            {(a.name || a.email || a.uid || "?").charAt(0).toUpperCase()}
+                            {(a.label || a.name || a.email || a.uid || "?").charAt(0).toUpperCase()}
                           </span>
                           <div className="min-w-0">
-                            <div className="max-w-[220px] truncate font-medium">{a.name || a.email || a.phone || a.uid}</div>
+                            <div className="max-w-[220px] truncate font-medium">{a.label || a.name || a.email || a.phone || a.uid}</div>
                             <div className="max-w-[220px] truncate text-[10px] text-muted-foreground">{a.email || a.uid || a.userType || "—"}</div>
                           </div>
                         </div>

@@ -9,8 +9,10 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
+
+static PROFILE_BACKFILLED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 use crate::account::{try_refresh_account, AccountInput, ClientCurrent};
 use crate::editions;
@@ -175,8 +177,48 @@ async fn install_update() -> Response {
 /* ---------------- 账号 ---------------- */
 
 async fn list_accounts(State(state): State<Arc<AppState>>, Query(q): Query<HashMap<String, String>>) -> Response {
-    let accounts = state.accounts.read().await;
     let edition = q.get("edition").map(|s| s.as_str());
+    // 旧账号入库时上游手机号字段（security_mobile）未被解析，首次加载回填一次
+    let pending: Vec<(String, String)> = {
+        let accounts = state.accounts.read().await;
+        accounts
+            .list_views(edition)
+            .into_iter()
+            .filter(|v| v.account.phone.is_empty() && (v.has_token || v.has_pat))
+            .map(|v| (v.account.id.clone(), v.account.edition.clone()))
+            .collect()
+    };
+    let todo: Vec<(String, String)> = {
+        let mut done = PROFILE_BACKFILLED.lock().unwrap();
+        pending.into_iter().filter(|(id, _)| done.insert(id.clone())).collect()
+    };
+    for (id, edition_value) in todo {
+        let token = {
+            let accounts = state.accounts.read().await;
+            accounts.get(&id).map(|a| {
+                if a.security_oauth_token.is_empty() {
+                    a.pat.clone()
+                } else {
+                    a.security_oauth_token.clone()
+                }
+            })
+        };
+        let Some(token) = token else { continue };
+        let ed = state.effective_edition(&edition_value).await;
+        if let Some(profile) = oauth::fetch_profile(&ed, &token).await {
+            let phone = profile
+                .get("phone")
+                .and_then(|v| v.as_str())
+                .or_else(|| profile.get("security_mobile").and_then(|v| v.as_str()))
+                .or_else(|| profile.get("securityMobile").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if !phone.is_empty() {
+                let mut accounts = state.accounts.write().await;
+                let _ = accounts.update(&id, &json!({ "phone": phone }));
+            }
+        }
+    }
+    let accounts = state.accounts.read().await;
     ok_json(json!({ "accounts": accounts.list_views(edition) }))
 }
 

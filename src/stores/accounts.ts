@@ -18,6 +18,7 @@ interface AccountsState {
   refreshCredits: (ids: string[]) => Promise<void>;
   ensureCredits: (ids: string[]) => Promise<void>;
   setAccountGroupLocal: (id: string, group: string) => void;
+  setAccountLabelLocal: (id: string, label: string) => void;
 }
 
 export const useAccountsStore = create<AccountsState>((set, get) => ({
@@ -164,5 +165,9 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
 
   setAccountGroupLocal(id, group) {
     set((s) => ({ accounts: s.accounts.map((a) => (a.id === id ? { ...a, group } : a)) }));
+  },
+
+  setAccountLabelLocal(id, label) {
+    set((s) => ({ accounts: s.accounts.map((a) => (a.id === id ? { ...a, label } : a)) }));
   },
 }));

@@ -170,7 +170,7 @@ export async function pollLogin(loginId) {
     uid,
     name: info.name || status.name || "",
     email: info.email || status.email || "",
-    phone: info.phone || status.phone || "",
+    phone: info.phone || info.security_mobile || info.securityMobile || status.phone || status.security_mobile || "",
     avatarUrl: info.avatarUrl || info.avatar_url || "",
     userType: status.userType || info.userType || plan.user_type || "personal_standard",
     orgId: status.orgId || info.orgId || "",
@@ -195,6 +195,25 @@ export async function pollLogin(loginId) {
     authSource: "oauth",
   };
   return { status: "done", account };
+}
+
+/** 拉取 userinfo：回填手机号/邮箱等缺失字段（上游手机号字段为 security_mobile） */
+export async function fetchProfile(edition, account) {
+  const result = await fetchJson(edition.oauth.openApiBaseUrl + edition.oauth.userInfoPath, {
+    headers: {
+      Authorization: `Bearer ${account.securityOauthToken || account.pat}`,
+      Accept: "application/json",
+      "User-Agent": "Qoder",
+    },
+    timeoutMs: 15000,
+  });
+  if (!result.ok) return null;
+  const info = result.json || {};
+  return {
+    name: info.name || "",
+    email: info.email || "",
+    phone: info.phone || info.security_mobile || info.securityMobile || "",
+  };
 }
 
 /**

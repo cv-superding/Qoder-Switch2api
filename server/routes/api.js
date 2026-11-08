@@ -45,8 +45,24 @@ export function createApiRouter({ getSettings, getProxyStatus, refreshProxyServe
   });
 
   /* ---------------- 账号 ---------------- */
-  router.get("/accounts", (req, res) => {
+  // 旧账号入库时上游手机号字段（security_mobile）未被解析，列表首次加载时回填一次
+  const profileBackfilled = new Set();
+  router.get("/accounts", async (req, res) => {
     const edition = req.query.edition;
+    const pending = accountManager.list(edition).filter((s) => !profileBackfilled.has(s.id));
+    for (const s of pending) profileBackfilled.add(s.id);
+    await Promise.all(
+      pending.map(async (s) => {
+        const acc = accountManager.get(s.id);
+        if (!acc || acc.phone || (!acc.securityOauthToken && !acc.pat)) return;
+        try {
+          const profile = await oauth.fetchProfile(getEdition(acc.edition), acc);
+          if (profile?.phone) accountManager.update(acc.id, { phone: profile.phone });
+        } catch {
+          /* 回填失败不影响列表 */
+        }
+      }),
+    );
     res.json({ accounts: accountManager.list(edition) });
   });
 
